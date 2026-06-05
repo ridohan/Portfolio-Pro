@@ -1057,7 +1057,7 @@ function calcEncaissementsAnnee(societeId, annee) {
   return { caHT, caTTC, recuHT };
 }
 
-// Assiette courante = CA confirmé reçu sur TOUTES les années (revenus réellement en poche)
+// Assiette courante = CA confirmé reçu (recu: true) — toutes années
 function calcAssietteCourante(societeId) {
   const missions = getMissionsActives(societeId);
   let total = 0;
@@ -1066,8 +1066,21 @@ function calcAssietteCourante(societeId) {
     .forEach(p => {
       const m = missions.find(x => x.id === p.mission_id);
       if (!m) return;
-      const c = calcCRACell(m, p.annee_fact, p.mois_fact);
-      total += c.caHT;
+      total += calcCRACell(m, p.annee_fact, p.mois_fact).caHT;
+    });
+  return total;
+}
+
+// Assiette intermédiaire = confirmé (recu: true) + prévu prochainement (recu: false)
+function calcAssietteIntermediaire(societeId) {
+  const missions = getMissionsActives(societeId);
+  let total = 0;
+  (STATE.paiements || [])
+    .filter(p => p.societe_id === societeId && p.recu !== null && p.recu !== undefined)
+    .forEach(p => {
+      const m = missions.find(x => x.id === p.mission_id);
+      if (!m) return;
+      total += calcCRACell(m, p.annee_fact, p.mois_fact).caHT;
     });
   return total;
 }
@@ -1118,12 +1131,14 @@ function renderSocBilan(soc) {
   });
 
   // ── Assiettes & totaux ───────────────────────────────────────────────────
-  const totEnc      = calcEncaissementsAnnee(soc.id, annee);   // { caHT, recuHT }
-  const totDeps     = calcDepensesAnnee(soc.id, annee);
-  const assietteCourante  = calcAssietteCourante(soc.id);       // confirmé toutes années
-  const assietteFin       = totEnc.caHT;                        // prévisionnel année
-  const resultatFin       = assietteFin - totDeps.totalHT;
-  const resultatCourant   = assietteCourante - totDeps.totalHT; // approximatif
+  const totEnc              = calcEncaissementsAnnee(soc.id, annee);
+  const totDeps             = calcDepensesAnnee(soc.id, annee);
+  const assietteCourante    = calcAssietteCourante(soc.id);
+  const assietteInter       = calcAssietteIntermediaire(soc.id);
+  const assietteFin         = totEnc.caHT;
+  const resultatCourant     = assietteCourante - totDeps.totalHT;
+  const resultatInter       = assietteInter - totDeps.totalHT;
+  const resultatFin         = assietteFin - totDeps.totalHT;
 
   // ── CSS helpers ──────────────────────────────────────────────────────────
   const TH  = (cur) => `px-2 py-2 text-center text-xs font-semibold border-r border-slate-700 min-w-[100px] ${cur ? 'bg-blue-900/40 text-blue-200' : 'bg-slate-700 text-slate-200'}`;
@@ -1157,14 +1172,16 @@ function renderSocBilan(soc) {
       const btnCls  = enc.recu === true
         ? 'bg-emerald-700 text-white hover:bg-emerald-600'
         : enc.recu === false
-          ? 'bg-amber-900/60 text-amber-400 hover:bg-amber-800/60'
+          ? 'bg-blue-900/60 text-blue-400 hover:bg-blue-800/60'
           : 'bg-slate-700 text-slate-500 hover:bg-slate-600 hover:text-slate-300';
       const btnIcon = enc.recu === true ? '✓' : enc.recu === false ? '⏳' : '○';
       const btnTitle = enc.recu === true
-        ? 'Paiement confirmé — cliquer pour repasser en attente'
-        : 'Cliquer pour confirmer la réception du paiement';
+        ? 'Paiement confirmé ✓ — cliquer pour passer en "prévu prochainement"'
+        : enc.recu === false
+          ? 'Prévu prochainement ⏳ — cliquer pour retirer le statut'
+          : 'Cliquer pour confirmer la réception du paiement';
 
-      const cellBg = enc.recu === true ? 'bg-emerald-950/30' : enc.recu === false ? 'bg-amber-950/20' : 'bg-slate-800/20';
+      const cellBg = enc.recu === true ? 'bg-emerald-950/30' : enc.recu === false ? 'bg-blue-950/20' : 'bg-slate-800/20';
 
       return `<td class="${TD(isCur, cellBg)}">
         <div class="flex flex-col items-center gap-0.5">
@@ -1267,58 +1284,45 @@ function renderSocBilan(soc) {
   </tr>`;
 
   // ── KPIs ─────────────────────────────────────────────────────────────────
-  const enAttente = totEnc.caHT - totEnc.recuHT;
+  const kpiCard = (icon, titre, sousTitre, assiette, resultat, borderCls, extra = '') => `
+  <div class="bg-slate-800 border ${borderCls} rounded-xl p-4">
+    <div class="text-slate-400 text-xs uppercase tracking-wide font-medium mb-3">${icon} ${titre}</div>
+    <div class="flex items-end justify-between mb-3">
+      <div>
+        <div class="text-white font-bold text-2xl">${fmtE(assiette)}</div>
+        <div class="text-slate-500 text-xs mt-0.5">${sousTitre}</div>
+      </div>
+      <div class="text-right">
+        <div class="text-red-400 text-sm font-medium">− ${fmtE(totDeps.totalHT)}</div>
+        <div class="text-slate-500 text-xs">dépenses</div>
+      </div>
+    </div>
+    <div class="pt-3 border-t border-slate-700 flex items-center justify-between">
+      <span class="text-slate-400 text-xs">Résultat estimé</span>
+      <span class="${resultat >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${fmtE(resultat)}</span>
+    </div>
+    ${extra}
+  </div>`;
+
   const kpis = `
-  <div class="grid grid-cols-2 gap-3 mb-5">
-
-    <!-- Assiette courante -->
-    <div class="bg-slate-800 border border-slate-600 rounded-xl p-4">
-      <div class="text-slate-400 text-xs uppercase tracking-wide font-medium mb-3">📍 Assiette courante (paiements confirmés)</div>
-      <div class="flex items-end justify-between">
-        <div>
-          <div class="text-white font-bold text-2xl">${fmtE(assietteCourante)}</div>
-          <div class="text-slate-500 text-xs mt-0.5">CA effectivement reçu</div>
-        </div>
-        <div class="text-right">
-          <div class="text-red-400 text-sm font-medium">− ${fmtE(totDeps.totalHT)}</div>
-          <div class="text-slate-500 text-xs">dépenses estimées</div>
-        </div>
-      </div>
-      <div class="mt-3 pt-3 border-t border-slate-700 flex items-center justify-between">
-        <span class="text-slate-400 text-xs">Résultat actuel estimé</span>
-        <span class="${resultatCourant >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${fmtE(resultatCourant)}</span>
-      </div>
-      ${enAttente > 0 ? `<div class="mt-2 text-amber-600 text-xs">⏳ ${fmtE(enAttente)} en attente de confirmation</div>` : ''}
-    </div>
-
-    <!-- Assiette fin d'année -->
-    <div class="bg-slate-800 border border-slate-600 rounded-xl p-4">
-      <div class="text-slate-400 text-xs uppercase tracking-wide font-medium mb-3">📅 Assiette prévisionnelle ${annee}</div>
-      <div class="flex items-end justify-between">
-        <div>
-          <div class="text-white font-bold text-2xl">${fmtE(assietteFin)}</div>
-          <div class="text-slate-500 text-xs mt-0.5">CA total prévu sur l'année</div>
-        </div>
-        <div class="text-right">
-          <div class="text-red-400 text-sm font-medium">− ${fmtE(totDeps.totalHT)}</div>
-          <div class="text-slate-500 text-xs">dépenses estimées</div>
-        </div>
-      </div>
-      <div class="mt-3 pt-3 border-t border-slate-700 flex items-center justify-between">
-        <span class="text-slate-400 text-xs">Résultat prévisionnel fin ${annee}</span>
-        <span class="${resultatFin >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${fmtE(resultatFin)}</span>
-      </div>
-      <div class="mt-2 text-slate-600 text-xs">avant charges sociales & impôts</div>
-    </div>
-
+  <div class="grid grid-cols-3 gap-3 mb-5">
+    ${kpiCard('✅', 'Assiette courante', 'Paiements ✓ confirmés', assietteCourante, resultatCourant, 'border-emerald-800/50')}
+    ${kpiCard('⏳', 'Assiette à court terme', 'Confirmés + ⏳ prévus prochainement', assietteInter, resultatInter, 'border-blue-700/40',
+      assietteInter > assietteCourante
+        ? `<div class="mt-2 text-blue-600 text-xs">+ ${fmtE(assietteInter - assietteCourante)} prévu prochainement</div>`
+        : ''
+    )}
+    ${kpiCard('📅', `Fin ${annee}`, 'Prévisionnel complet', assietteFin, resultatFin, 'border-slate-600',
+      '<div class="mt-2 text-slate-600 text-xs">avant charges sociales & impôts</div>'
+    )}
   </div>`;
 
   // ── Légende statuts ──────────────────────────────────────────────────────
   const legende = `
   <div class="flex items-center gap-4 mb-3 text-xs text-slate-500">
-    <span class="flex items-center gap-1"><span class="bg-emerald-700 text-white px-1 rounded text-xs">✓</span> Paiement reçu</span>
-    <span class="flex items-center gap-1"><span class="bg-amber-900/60 text-amber-400 px-1 rounded text-xs">⏳</span> En attente explicite</span>
-    <span class="flex items-center gap-1"><span class="bg-slate-700 text-slate-500 px-1 rounded text-xs">○</span> Non statué</span>
+    <span class="flex items-center gap-1"><span class="bg-emerald-700 text-white px-1 rounded text-xs">✓</span> Confirmé reçu → assiette courante</span>
+    <span class="flex items-center gap-1"><span class="bg-blue-900/60 text-blue-400 px-1 rounded text-xs">⏳</span> Prévu prochainement → assiette court terme</span>
+    <span class="flex items-center gap-1"><span class="bg-slate-700 text-slate-500 px-1 rounded text-xs">○</span> Non statué → fin d'année seulement</span>
     <span class="text-slate-600 ml-2">Cliquer sur le bouton dans chaque cellule pour changer le statut</span>
   </div>`;
 
@@ -1364,9 +1368,9 @@ function _perioLabel(p) {
 // ─── SIMULATION FISCALE SASU IR ──────────────────────────────────────────────
 
 const SCENARIOS_CSG = [
-  { id: 's0',   label: '0 % — Exonération',      taux: 0,     deductible: 0,     note: 'Cas rarissime (exonération explicite)' },
-  { id: 's97',  label: '9,7 % — Taux activité',  taux: 0.097, deductible: 0.068, note: '6,8 % CSG déductible + 2,9 % CRDS/CSG non ded.' },
-  { id: 's172', label: '17,2 % — Revenus capital', taux: 0.172, deductible: 0,   note: 'Taux PFU — aucune déduction de la base IR' },
+  { id: 's0',   label: '0 % — Exonération',        taux: 0,     note: 'Cas rarissime (exonération explicite)' },
+  { id: 's97',  label: '9,7 % — Taux activité',    taux: 0.097, note: '6,8 % CSG déductible de l\'IR N+1 · 2,9 % CRDS non déductible' },
+  { id: 's172', label: '17,2 % — Revenus capital', taux: 0.172, note: 'Taux prélèvements sociaux — aucune déduction IR' },
 ];
 
 function getBilanIRConfig(societeId) {
@@ -1395,8 +1399,8 @@ function saveBilanIRConfig(societeId) {
     foncier:      parseFloat(document.getElementById('fi-fonc')?.value)  || 0,
     micro_foncier: parseFloat(document.getElementById('fi-mfonc')?.value) || 0,
     per:          parseFloat(document.getElementById('fi-per')?.value)   || 0,
-    pas_vous:     parseFloat(document.getElementById('fi-pas')?.value)   || 0,
-    pas_conjoint: 0,
+    pas_vous:     parseFloat(document.getElementById('fi-pas')?.value)    || 0,
+    pas_conjoint: parseFloat(document.getElementById('fi-pas-c')?.value)  || 0,
   };
   if (!STATE.fiscal_configs) STATE.fiscal_configs = [];
   const idx = STATE.fiscal_configs.findIndex(x => x.societe_id === societeId);
@@ -1432,22 +1436,22 @@ function _buildIRParams(cfg, bnc) {
 function calcScenariosIR(assiette, cfg) {
   return SCENARIOS_CSG.map(s => {
     const csgMontant = Math.round(assiette * s.taux);
-    const csgDed     = Math.round(assiette * s.deductible);
-    const bncNet     = Math.max(0, assiette - csgDed);
-    const ir         = calcIR(_buildIRParams(cfg, bncNet));
-    // PS foncier déjà dans ir.impotFinal ; on l'isole pour clarté
-    const irSurBNC   = ir.impotFinal - ir.totalPS; // IR pur (hors PS foncier)
+    // IR calculé sur l'assiette PLEINE — la CSG déductible (6,8%) s'applique l'année N+1, pas N
+    const ir         = calcIR(_buildIRParams(cfg, assiette));
     const totalTaxes = csgMontant + ir.impotFinal;
     const netImpot   = assiette - totalTaxes;
     const tauxEff    = assiette > 0 ? (totalTaxes / assiette * 100).toFixed(1) : '—';
-    return { ...s, csgMontant, csgDed, bncNet, ir, irSurBNC, totalTaxes, netImpot, tauxEff };
+    const pctNet     = assiette > 0 ? (netImpot   / assiette * 100).toFixed(1) : '—';
+    return { ...s, csgMontant, ir, totalTaxes, netImpot, tauxEff, pctNet };
   });
 }
 
 function renderFiscalResultats(soc) {
-  const cfg             = getBilanIRConfig(soc.id);
-  const assietteCour    = Math.max(0, calcAssietteCourante(soc.id) - calcDepensesAnnee(soc.id, _bilanAnnee).totalHT);
-  const assietteFin     = Math.max(0, calcEncaissementsAnnee(soc.id, _bilanAnnee).caHT - calcDepensesAnnee(soc.id, _bilanAnnee).totalHT);
+  const cfg          = getBilanIRConfig(soc.id);
+  const totDepsHT    = calcDepensesAnnee(soc.id, _bilanAnnee).totalHT;
+  const assietteCour = Math.max(0, calcAssietteCourante(soc.id)        - totDepsHT);
+  const assietteInter= Math.max(0, calcAssietteIntermediaire(soc.id)   - totDepsHT);
+  const assietteFin  = Math.max(0, calcEncaissementsAnnee(soc.id, _bilanAnnee).caHT - totDepsHT);
 
   const renderBloc = (assiette, titreAssiette) => {
     if (assiette <= 0) return `
@@ -1468,14 +1472,8 @@ function renderFiscalResultats(soc) {
         ${scenarios.map((s, i) => {
           const highlight = i === 1;
           const pas = (cfg.pas_vous || 0) + (cfg.pas_conjoint || 0);
-          // IR à prévoir = solde à régler lors de la déclaration (peut être négatif = remboursement)
-          const irAPayer    = s.ir.resteAPayer;
-          // Total encore à décaisser = IR solde + CSG/CRDS (les acomptes PAS sont déjà sortis)
+          const irAPayer           = s.ir.resteAPayer;
           const totalAProvisionner = s.csgMontant + Math.max(0, irAPayer);
-          // Taux de prélèvement réel = tout ce qui sort / assiette (y compris PAS déjà versé)
-          const tauxPrelevement = assiette > 0 ? (s.totalTaxes / assiette * 100).toFixed(1) : '—';
-          // Part nette conservée
-          const pctNet = assiette > 0 ? (s.netImpot / assiette * 100).toFixed(1) : '—';
 
           return `
           <div class="rounded-xl border p-4 ${highlight ? 'border-blue-600/60 bg-blue-950/20' : 'border-slate-700 bg-slate-800/60'}">
@@ -1490,15 +1488,14 @@ function renderFiscalResultats(soc) {
                 <span class="text-slate-500">CSG / CRDS (SASU)</span>
                 <span class="${s.csgMontant > 0 ? 'text-red-400' : 'text-slate-600'}">${s.csgMontant > 0 ? '− ' + fmtE(s.csgMontant) : '—'}</span>
               </div>
-              ${s.csgDed > 0 ? `<div class="flex justify-between pl-3">
-                <span class="text-slate-600">dont déduit de la base IR</span>
-                <span class="text-slate-500">(${fmtE(s.csgDed)})</span>
+              ${s.id === 's97' ? `<div class="pl-3 text-slate-600 text-xs leading-4 mb-1">
+                6,8 % CSG déductible de votre IR <em>N+1</em> (non pris en compte ici)
               </div>` : ''}
 
               <!-- Base IR -->
               <div class="flex justify-between border-t border-slate-700/60 pt-1.5 mt-1">
-                <span class="text-slate-500">BNC déclaré (après déduction)</span>
-                <span class="text-slate-300">${fmtE(s.bncNet)}</span>
+                <span class="text-slate-500">BNC déclaré</span>
+                <span class="text-slate-300">${fmtE(assiette)}</span>
               </div>
               <div class="flex justify-between">
                 <span class="text-slate-500">Revenu net global du foyer</span>
@@ -1570,9 +1567,9 @@ function renderFiscalResultats(soc) {
                 </div>
                 <div class="text-right">
                   <div class="text-slate-600 text-xs">Prélèvements / assiette</div>
-                  <div class="text-slate-400 text-sm font-medium">${tauxPrelevement}%</div>
+                  <div class="text-slate-400 text-sm font-medium">${s.tauxEff}%</div>
                   <div class="text-slate-600 text-xs">Net conservé</div>
-                  <div class="${s.netImpot >= 0 ? 'text-emerald-600' : 'text-red-600'} text-sm font-medium">${pctNet}%</div>
+                  <div class="${s.netImpot >= 0 ? 'text-emerald-600' : 'text-red-600'} text-sm font-medium">${s.pctNet}%</div>
                 </div>
               </div>
             </div>
@@ -1583,9 +1580,11 @@ function renderFiscalResultats(soc) {
   };
 
   return `
-  ${renderBloc(assietteCour, '📍 Assiette courante (confirmée)')}
-  <div class="border-t border-slate-700 my-4"></div>
-  ${renderBloc(assietteFin, `📅 Assiette prévisionnelle ${_bilanAnnee}`)}`;
+  ${renderBloc(assietteCour, '✅ Assiette courante (paiements confirmés)')}
+  <div class="border-t border-slate-700 my-6"></div>
+  ${renderBloc(assietteInter, '⏳ Assiette à court terme (confirmés + prévus prochainement)')}
+  <div class="border-t border-slate-700 my-6"></div>
+  ${renderBloc(assietteFin, `📅 Assiette prévisionnelle fin ${_bilanAnnee}`)}`;
 }
 
 function renderSimuFiscale(soc) {
@@ -1644,8 +1643,12 @@ function renderSimuFiscale(soc) {
             <input id="fi-per" class="input" type="number" min="0" value="${cfg.per || ''}" placeholder="0" onchange="saveBilanIRConfig('${soc.id}')" />
           </div>
           <div>
-            <label class="label">PAS déjà versé (€)</label>
+            <label class="label">PAS / acomptes vous (€)</label>
             <input id="fi-pas" class="input" type="number" min="0" value="${cfg.pas_vous || ''}" placeholder="0" onchange="saveBilanIRConfig('${soc.id}')" />
+          </div>
+          <div>
+            <label class="label">PAS / acomptes conjoint (€)</label>
+            <input id="fi-pas-c" class="input" type="number" min="0" value="${cfg.pas_conjoint || ''}" placeholder="0" onchange="saveBilanIRConfig('${soc.id}')" />
           </div>
         </div>
         <p class="text-slate-600 text-xs mt-3">Sauvegarde automatique · Le BNC de la SASU est injecté automatiquement depuis votre résultat prévisionnel.</p>
