@@ -27,6 +27,11 @@
     .btn-danger:hover    { background: rgba(220,38,38,.4); }
     .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 1rem; }
     .modal-box { background: #1e293b; border-radius: 1rem; padding: 1.5rem; width: 100%; max-width: 28rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,.5); max-height: 90vh; overflow-y: auto; }
+    /* Collapsible blocks */
+    details > summary { list-style: none; cursor: pointer; user-select: none; }
+    details > summary::-webkit-details-marker { display: none; }
+    details > summary .chevron { transition: transform 200ms; }
+    details[open] > summary .chevron { transform: rotate(180deg); }
   </style>
 </head>
 <body class="text-slate-100 min-h-screen">

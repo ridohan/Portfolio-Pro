@@ -529,41 +529,71 @@ function calcIR(params) {
     situation         = 'celibataire',
     nbEnfants         = 0,
     salaires_mode     = 'brut',
-    salaires          = 0,
+    salaires_vous     = 0,
+    salaires_conjoint = 0,
     bic_bnc           = 0,
     foncier           = 0,
+    micro_foncier     = 0,
     dividendes_bareme = 0,
     dividendes_pfu    = 0,
     pv_bareme         = 0,
     pv_pfu            = 0,
     autres            = 0,
+    // Déductions
+    per               = 0,
+    // Réductions
+    dons              = 0,
+    scol_college      = 0,
+    scol_lycee        = 0,
+    scol_superieur    = 0,
+    // Crédits
+    garde_enfants     = 0,
+    emploi_domicile   = 0,
+    formation         = 0,
+    autres_credits    = 0,
+    // PAS
+    pas_preleve       = 0,
   } = params;
 
   const b = BAREMES[annee] || BAREMES[2025];
 
-  // 1. Abattement 10% sur salaires (sauf si l'utilisateur saisit déjà le net fiscal)
-  const abatt10 = (salaires_mode === 'net' || salaires === 0)
-    ? 0
-    : Math.min(Math.max(salaires * 0.10, b.abatt_sal_min), b.abatt_sal_max);
-  const salairesNet = Math.max(0, salaires - abatt10);
+  const salaires = salaires_vous + salaires_conjoint;
+
+  // 1. Abattement 10% — appliqué PAR PERSONNE (le minimum 504€ est individuel)
+  function _abatt10(sal) {
+    if (salaires_mode === 'net' || !sal || sal <= 0) return 0;
+    return Math.min(Math.max(sal * 0.10, b.abatt_sal_min), b.abatt_sal_max);
+  }
+  const abatt10_vous     = _abatt10(salaires_vous);
+  const abatt10_conjoint = _abatt10(salaires_conjoint);
+  const abatt10          = abatt10_vous + abatt10_conjoint;
+  const salairesNet      = Math.max(0, salaires - abatt10);
 
   // 2. Abattement 40% sur dividendes option barème
   const abatt40 = dividendes_bareme * 0.40;
   const dividendesBaremeNet = dividendes_bareme * 0.60;
 
-  // 3. Revenu net global
-  const revenuNetGlobal = salairesNet + bic_bnc + foncier + dividendesBaremeNet + pv_bareme + autres;
+  // 2b. Micro-foncier : abattement 30% sur recettes brutes (régime si total brut ≤ 15 000€)
+  const abattMicroFoncier = Math.round(micro_foncier * 0.30);
+  const microFoncierNet   = micro_foncier - abattMicroFoncier;
+
+  // 3. Revenu net global (avant déductions spécifiques)
+  const revenuNetGlobal = salairesNet + bic_bnc + foncier + microFoncierNet + dividendesBaremeNet + pv_bareme + autres;
+
+  // 3b. Déduction PER (réduit le revenu imposable, dans la limite du revenu global)
+  const deductionPER   = Math.min(Math.max(0, per), revenuNetGlobal);
+  const revenuImposable = Math.max(0, revenuNetGlobal - deductionPER);
 
   // 4. Quotient familial
   const nbParts   = calcParts(situation, nbEnfants);
   const baseParts = situation === 'marie' ? 2 : 1;
 
-  // 5. Impôt base (sans enfants)
-  const impotBase_raw = calcImpotBareme(revenuNetGlobal / baseParts, b.tranches);
+  // 5. Impôt base (sans enfants) — sur revenu après déduction PER
+  const impotBase_raw = calcImpotBareme(revenuImposable / baseParts, b.tranches);
   const impotBase     = impotBase_raw.impot * baseParts;
 
   // 6. Impôt avec QF complet (avec enfants)
-  const impotAvecQF_raw = calcImpotBareme(revenuNetGlobal / nbParts, b.tranches);
+  const impotAvecQF_raw = calcImpotBareme(revenuImposable / nbParts, b.tranches);
   const impotAvecQF     = impotAvecQF_raw.impot * nbParts;
 
   // 7. Plafonnement QF
@@ -596,7 +626,7 @@ function calcIR(params) {
   }
   const impotNet = Math.max(0, impotBrut - decote);
 
-  // 9. CEHR
+  // 9. CEHR — sur revenu fiscal de référence (revenuNetGlobal SANS déduction PER, car le PER réduit l'IR mais pas le RFR)
   const rfr = revenuNetGlobal + dividendes_pfu + pv_pfu;
   let cehr = 0;
   if (situation === 'marie') {
@@ -608,7 +638,18 @@ function calcIR(params) {
   }
   cehr = Math.round(cehr);
 
-  // 10. PFU 30% (12,8% IR + 17,2% PS)
+  // 10. Prélèvements sociaux 17,2% sur revenus fonciers (hors PFU qui les inclut déjà)
+  // S'appliquent sur le revenu NET : régime réel → foncier directement, micro-foncier → après abatt. 30%
+  const psFoncier      = Math.round((foncier + microFoncierNet) * 0.172);
+  // Détail CSG/CRDS/PS pour affichage
+  const psFoncierCSG   = Math.round((foncier + microFoncierNet) * 0.092);  // CSG 9,2%
+  const psFoncierCRDS  = Math.round((foncier + microFoncierNet) * 0.005);  // CRDS 0,5%
+  const psFoncierSol   = Math.round((foncier + microFoncierNet) * 0.075);  // Prél. solidarité 7,5%
+
+  // Prélèvements sociaux sur dividendes barème (17,2% du brut, l'abatt. 40% ne s'applique pas aux PS)
+  const psDivBareme    = Math.round(dividendes_bareme * 0.172);
+
+  // 11. PFU 30% (12,8% IR + 17,2% PS) — les PS sont déjà inclus dans le PFU
   const pfuDiv   = Math.round(dividendes_pfu * 0.30);
   const pfuDivIR = Math.round(dividendes_pfu * 0.128);
   const pfuDivPS = Math.round(dividendes_pfu * 0.172);
@@ -617,33 +658,93 @@ function calcIR(params) {
   const pfuPVPS  = Math.round(pv_pfu * 0.172);
 
   const totalPFU    = pfuDiv + pfuPV;
-  const totalImpots = impotNet + cehr + totalPFU;
+  const totalPS     = psFoncier + psDivBareme; // PS hors PFU (PFU inclut déjà ses PS)
 
-  const revenuTotal = salaires + bic_bnc + foncier + dividendes_bareme + dividendes_pfu + pv_bareme + pv_pfu + autres;
-  const txMoyen     = revenuTotal > 0 ? (totalImpots / revenuTotal) * 100 : 0;
-
-  // Taux marginal
+  // Taux marginal (sur revenu imposable après PER)
   let txMarginal = 0;
   for (let i = b.tranches.length - 1; i >= 0; i--) {
-    if ((revenuNetGlobal / nbParts) > b.tranches[i].min) {
+    if ((revenuImposable / nbParts) > b.tranches[i].min) {
       txMarginal = b.tranches[i].taux * 100;
       break;
     }
   }
 
+  // ── RÉDUCTIONS D'IMPÔT (non remboursables) ──────────────────────────────────
+
+  // Dons associations : 66% dans la limite de 20% du revenu imposable
+  const donsEffectifs   = Math.min(dons, revenuImposable * 0.20);
+  const reductionDons   = Math.round(donsEffectifs * 0.66);
+  // Scolarité enfants
+  const reductionScol   = scol_college * 61 + scol_lycee * 153 + scol_superieur * 183;
+  const totalReductions = reductionDons + reductionScol;
+
+  // Impôt barème net après réductions (plancher 0)
+  const impotApresReductions = Math.max(0, impotNet + cehr - totalReductions);
+
+  // ── CRÉDITS D'IMPÔT (remboursables) ─────────────────────────────────────────
+
+  // Garde enfants < 6 ans : crédit 50%, plafond 3 500€/enfant (soit crédit max 1 750€/enfant)
+  // Plafond du CRÉDIT : 1 750€/enfant (= 50% × 3 500€ de dépenses max/enfant)
+  const plafondGarde  = 1750 * Math.max(1, Math.floor(nbEnfants));
+  const creditGarde   = Math.min(Math.round(garde_enfants * 0.50), plafondGarde);
+
+  // Emploi à domicile : crédit 50%, plafond dépenses 12 000€ (crédit max 6 000€)
+  const creditDomicile = Math.min(Math.round(emploi_domicile * 0.50), 6000);
+
+  // Formation dirigeant : crédit = montant formation (max = SMIC horaire × nb heures,
+  //   mais on laisse l'utilisateur entrer le montant du crédit directement)
+  const creditFormation = Math.max(0, Math.round(formation));
+
+  // Autres crédits libres
+  const creditAutres = Math.max(0, Math.round(autres_credits));
+
+  const totalCredits = creditGarde + creditDomicile + creditFormation + creditAutres;
+
+  // ── SYNTHÈSE FINALE ─────────────────────────────────────────────────────────
+
+  // Impôt IR total = impôt barème net après réductions + PFU - crédits
+  // Note : les crédits peuvent générer un remboursement (si > impôt restant dû)
+  const impotIRNetCredits  = impotApresReductions - totalCredits;
+  const impotTotalBrut     = impotApresReductions + totalPFU; // avant crédits
+  const impotTotalNetCredits = impotTotalBrut - totalCredits;
+
+  const remboursementCredits = totalCredits > impotApresReductions
+    ? totalCredits - impotApresReductions : 0;
+
+  // Reste à payer = total dû - PAS déjà prélevé (peut être négatif → remboursement)
+  // Note : les PS fonciers sont dus séparément (avis d'imposition distinct) mais on les inclut dans le total
+  const impotFinal  = Math.max(0, impotIRNetCredits) + totalPFU + totalPS;
+  const resteAPayer = impotFinal - pas_preleve;
+  const remboursementPAS = resteAPayer < 0 ? Math.abs(resteAPayer) : 0;
+
+  const revenuTotal = salaires + bic_bnc + foncier + micro_foncier + dividendes_bareme + dividendes_pfu + pv_bareme + pv_pfu + autres;
+  const txMoyen     = revenuTotal > 0 ? (impotFinal / revenuTotal) * 100 : 0;
+
   return {
     // Inputs recap
-    salairesNet, abatt10, abatt40, dividendesBaremeNet,
-    revenuNetGlobal, rfr, nbParts, baseParts,
+    salaires, salairesNet, abatt10, abatt10_vous, abatt10_conjoint, abatt40, dividendesBaremeNet,
+    abattMicroFoncier, microFoncierNet,
+    revenuNetGlobal, revenuImposable, deductionPER, rfr, nbParts, baseParts,
     // Barème
     detailTranches, impotBase, impotQFBrut, correctionPlafond,
     avantageQF, avantageReel, plafondAvantage,
     impotBrut, decote, impotNet, cehr,
+    // Réductions
+    donsEffectifs, reductionDons, reductionScol, totalReductions,
+    impotApresReductions,
+    // Crédits
+    creditGarde, creditDomicile, creditFormation, creditAutres, totalCredits,
+    remboursementCredits,
+    // Prélèvements sociaux hors PFU
+    psFoncier, psFoncierCSG, psFoncierCRDS, psFoncierSol,
+    psDivBareme, totalPS,
     // PFU
     pfuDiv, pfuDivIR, pfuDivPS,
     pfuPV,  pfuPVIR, pfuPVPS,
+    totalPFU,
     // Totaux
-    totalPFU, totalImpots,
+    impotFinal, totalImpots: impotFinal,
+    resteAPayer, remboursementPAS,
     txMoyen: Math.round(txMoyen * 100) / 100,
     txMarginal,
   };
@@ -655,16 +756,45 @@ let _irState = {
   annee:              2025,
   situation:          'celibataire',
   nbEnfants:          0,
-  salaires_mode:      'brut', // 'brut' = j'applique abattement 10% | 'net' = revenu net fiscal direct
-  salaires:           0,
+  salaires_mode:      'brut',
+  // Revenus
+  salaires_vous:      0,
+  salaires_conjoint:  0,
   bic_bnc:            0,
   foncier:            0,
+  micro_foncier:      0,
   dividendes_bareme:  0,
   dividendes_pfu:     0,
   pv_bareme:          0,
   pv_pfu:             0,
   autres:             0,
+  // Déductions du revenu imposable
+  per:                0,   // versements PER déductibles
+  // Réductions d'impôt (non remboursables)
+  dons:               0,   // dons aux associations (réduction 66%)
+  scol_college:       0,   // nb enfants au collège (réduction 61€/enfant)
+  scol_lycee:         0,   // nb enfants au lycée (réduction 153€/enfant)
+  scol_superieur:     0,   // nb enfants dans le supérieur (réduction 183€/enfant)
+  // Crédits d'impôt (remboursables)
+  garde_enfants:      0,   // frais garde enfants < 6 ans (crédit 50%, max 3 500€/enfant)
+  emploi_domicile:    0,   // frais emploi à domicile (crédit 50%, max 12 000€)
+  formation:          0,   // crédit impôt formation dirigeant
+  autres_credits:     0,   // autres crédits d'impôt
+  // Prélèvements déjà effectués
+  pas_vous:           0,   // PAS prélevé sur le déclarant (retenues + acomptes)
+  pas_conjoint:       0,   // PAS prélevé sur le conjoint
 };
+
+// Convertit _irState (champs UI) en paramètres pour calcIR
+function getIRParams() {
+  const s = _irState;
+  return {
+    ...s,
+    // salaires_vous et salaires_conjoint sont déjà dans _irState
+    // calcIR applique l'abattement 10% par personne
+    pas_preleve: (s.pas_vous || 0) + (s.pas_conjoint || 0),
+  };
+}
 
 function renderSimulateurIR(app, simId) {
   app.innerHTML = `
@@ -674,12 +804,21 @@ function renderSimulateurIR(app, simId) {
       <div>
         <h1 class="text-xl font-bold text-white">Simulateur IR</h1>
         <p class="text-slate-400 text-sm mt-0.5" id="ir-subtitle">${BAREMES[_irState.annee]?.label || ''}</p>
+        <p class="text-blue-400 text-xs mt-0.5" id="ir-simname">${_currentSimId ? (() => { const s = lsGetSimulations().find(x => x.id === _currentSimId); return s ? '📂 ' + s.nom : ''; })() : ''}</p>
       </div>
-      <button onclick="saveSimulationIR()" class="btn-secondary text-sm">💾 Sauvegarder</button>
+      <div class="flex gap-2 items-center">
+        <button onclick="openSimulationsIR()" class="btn-secondary text-sm">📂 Mes simulations</button>
+        <div id="ir-save-btns" class="flex gap-2">
+          ${_currentSimId
+            ? `<button id="btn-update-ir" onclick="updateSimulationIR()" class="btn-primary text-sm">💾 Mettre à jour</button>
+               <button id="btn-save-ir"   onclick="saveSimulationIR()"   class="btn-secondary text-sm">+ Nouvelle copie</button>`
+            : `<button id="btn-save-ir" onclick="saveSimulationIR()" class="btn-primary text-sm">💾 Sauvegarder</button>`}
+        </div>
+      </div>
     </div>
     <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
       <!-- Formulaire -->
-      <div class="lg:col-span-2 space-y-4">
+      <div class="lg:col-span-2 space-y-4" id="ir-form">
         ${renderIRForm()}
       </div>
       <!-- Résultats -->
@@ -690,15 +829,27 @@ function renderSimulateurIR(app, simId) {
   </div>`;
 }
 
+function irBlock(title, content, { open = false, borderClass = 'border-slate-700' } = {}) {
+  return `
+  <details class="bg-slate-800 rounded-xl border ${borderClass}" ${open ? 'open' : ''}>
+    <summary class="flex items-center justify-between px-4 py-3">
+      <span class="font-semibold text-white text-sm">${title}</span>
+      <span class="chevron text-slate-400 text-xs">▾</span>
+    </summary>
+    <div class="px-4 pb-4 space-y-3 border-t border-slate-700/60 pt-3">
+      ${content}
+    </div>
+  </details>`;
+}
+
 function renderIRForm() {
   const s = _irState;
+  const marie = s.situation === 'marie';
   const anneesOptions = Object.keys(BAREMES).sort((a,b) => b - a).map(y =>
     `<option value="${y}" ${s.annee == y ? 'selected' : ''}>${BAREMES[y].label}</option>`
   ).join('');
 
-  return `
-  <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 space-y-4">
-    <h3 class="font-semibold text-white">Situation fiscale</h3>
+  const situationContent = `
     <div>
       <label class="label">Année de revenus</label>
       <select class="input" onchange="updateIR('annee', parseInt(this.value)); document.getElementById('ir-subtitle').textContent = BAREMES[parseInt(this.value)]?.label || ''">
@@ -717,26 +868,33 @@ function renderIRForm() {
       <label class="label">Nombre d'enfants à charge</label>
       <input class="input" type="number" min="0" value="${s.nbEnfants}"
         onchange="updateIR('nbEnfants', parseInt(this.value)||0)" />
-    </div>
-  </div>
+    </div>`;
 
-  <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 space-y-3">
-    <h3 class="font-semibold text-white">Revenus</h3>
-
+  const revenusContent = `
     <div class="space-y-1">
       <label class="label">Salaires / traitements</label>
-      <div class="flex gap-1 mb-1">
+      <div class="flex gap-1 mb-2">
         <button onclick="updateIR('salaires_mode','brut')"
           class="flex-1 text-xs py-1 rounded transition-colors ${s.salaires_mode!=='net' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">
-          Brut <span class="opacity-70">(abatt. 10% auto)</span>
+          Brut <span class="opacity-70">(abatt. 10%)</span>
         </button>
         <button onclick="updateIR('salaires_mode','net')"
           class="flex-1 text-xs py-1 rounded transition-colors ${s.salaires_mode==='net' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">
-          Net fiscal <span class="opacity-70">(après abatt.)</span>
+          Net fiscal
         </button>
       </div>
-      <input class="input" type="number" min="0" value="${s.salaires||''}"
-        placeholder="0" onchange="updateIR('salaires', parseFloat(this.value)||0)" />
+      <div class="grid ${marie ? 'grid-cols-2' : 'grid-cols-1'} gap-2">
+        <div>
+          ${marie ? '<p class="text-slate-500 text-xs mb-1">Vous</p>' : ''}
+          <input class="input" type="number" min="0" value="${s.salaires_vous||''}"
+            placeholder="0" onchange="updateIR('salaires_vous', parseFloat(this.value)||0)" />
+        </div>
+        ${marie ? `<div>
+          <p class="text-slate-500 text-xs mb-1">Conjoint·e</p>
+          <input class="input" type="number" min="0" value="${s.salaires_conjoint||''}"
+            placeholder="0" onchange="updateIR('salaires_conjoint', parseFloat(this.value)||0)" />
+        </div>` : ''}
+      </div>
     </div>
 
     <div>
@@ -746,61 +904,149 @@ function renderIRForm() {
     </div>
 
     <div>
-      <label class="label">Revenus fonciers nets (€)</label>
+      <label class="label">Revenus fonciers nets — régime réel (€)</label>
       <input class="input" type="number" min="0" value="${s.foncier||''}"
         placeholder="0" onchange="updateIR('foncier', parseFloat(this.value)||0)" />
     </div>
 
-    <hr class="border-slate-600" />
+    <div class="space-y-1">
+      <label class="label">Micro-foncier — recettes brutes (€)</label>
+      <p class="text-slate-500 text-xs -mt-1">Abattement 30% auto (régime si recettes ≤ 15 000€/an)</p>
+      <input class="input" type="number" min="0" value="${s.micro_foncier||''}"
+        placeholder="0" onchange="updateIR('micro_foncier', parseFloat(this.value)||0)" />
+    </div>
 
+    `;
+
+  const divPvContent = `
     <div class="space-y-1">
       <label class="label">Dividendes — option barème (€)</label>
-      <p class="text-slate-500 text-xs -mt-1">Abattement 40% + intégration au barème IR</p>
+      <p class="text-slate-500 text-xs -mt-1">Abattement 40% + barème IR</p>
       <input class="input" type="number" min="0" value="${s.dividendes_bareme||''}"
         placeholder="0" onchange="updateIR('dividendes_bareme', parseFloat(this.value)||0)" />
     </div>
-
     <div class="space-y-1">
       <label class="label">Dividendes — PFU / flat tax (€)</label>
       <p class="text-slate-500 text-xs -mt-1">Flat tax 30% (12,8% IR + 17,2% PS)</p>
       <input class="input" type="number" min="0" value="${s.dividendes_pfu||''}"
         placeholder="0" onchange="updateIR('dividendes_pfu', parseFloat(this.value)||0)" />
     </div>
-
-    <hr class="border-slate-600" />
-
+    <hr class="border-slate-600/60" />
     <div class="space-y-1">
       <label class="label">Plus-values mobilières — option barème (€)</label>
       <input class="input" type="number" min="0" value="${s.pv_bareme||''}"
         placeholder="0" onchange="updateIR('pv_bareme', parseFloat(this.value)||0)" />
     </div>
-
     <div class="space-y-1">
       <label class="label">Plus-values mobilières — PFU (€)</label>
       <input class="input" type="number" min="0" value="${s.pv_pfu||''}"
         placeholder="0" onchange="updateIR('pv_pfu', parseFloat(this.value)||0)" />
     </div>
-
-    <hr class="border-slate-600" />
-
+    <hr class="border-slate-600/60" />
     <div>
       <label class="label">Autres revenus imposables (€)</label>
       <input class="input" type="number" value="${s.autres||''}"
         placeholder="0" onchange="updateIR('autres', parseFloat(this.value)||0)" />
+    </div>`;
+
+  const deductionsContent = `
+    <div class="space-y-1">
+      <label class="label">PER — versements déductibles (€)</label>
+      <p class="text-slate-500 text-xs -mt-1">Réduit directement le revenu imposable</p>
+      <input class="input" type="number" min="0" value="${s.per||''}"
+        placeholder="0" onchange="updateIR('per', parseFloat(this.value)||0)" />
+    </div>`;
+
+  const reductionsContent = `
+    <div class="space-y-1">
+      <label class="label">Dons aux associations (€ versés)</label>
+      <p class="text-slate-500 text-xs -mt-1">Réduction 66%, limite 20% du revenu imposable</p>
+      <input class="input" type="number" min="0" value="${s.dons||''}"
+        placeholder="0" onchange="updateIR('dons', parseFloat(this.value)||0)" />
     </div>
-  </div>`;
+    <div>
+      <label class="label">Scolarité — enfants au collège</label>
+      <input class="input" type="number" min="0" value="${s.scol_college||''}"
+        placeholder="0" onchange="updateIR('scol_college', parseInt(this.value)||0)" />
+    </div>
+    <div>
+      <label class="label">Scolarité — enfants au lycée</label>
+      <input class="input" type="number" min="0" value="${s.scol_lycee||''}"
+        placeholder="0" onchange="updateIR('scol_lycee', parseInt(this.value)||0)" />
+    </div>
+    <div>
+      <label class="label">Scolarité — enseignement supérieur</label>
+      <input class="input" type="number" min="0" value="${s.scol_superieur||''}"
+        placeholder="0" onchange="updateIR('scol_superieur', parseInt(this.value)||0)" />
+    </div>`;
+
+  const creditsContent = `
+    <div class="space-y-1">
+      <label class="label">Garde d'enfants &lt; 6 ans (€ de frais)</label>
+      <p class="text-slate-500 text-xs -mt-1">Crédit 50% des frais, max 1 750€ de crédit par enfant</p>
+      <input class="input" type="number" min="0" value="${s.garde_enfants||''}"
+        placeholder="0" onchange="updateIR('garde_enfants', parseFloat(this.value)||0)" />
+    </div>
+    <div class="space-y-1">
+      <label class="label">Emploi à domicile — femme de ménage, etc. (€ de frais)</label>
+      <p class="text-slate-500 text-xs -mt-1">Crédit 50%, max 12 000€ de frais (6 000€ de crédit)</p>
+      <input class="input" type="number" min="0" value="${s.emploi_domicile||''}"
+        placeholder="0" onchange="updateIR('emploi_domicile', parseFloat(this.value)||0)" />
+    </div>
+    <div class="space-y-1">
+      <label class="label">Formation dirigeant (€ de crédit d'impôt)</label>
+      <p class="text-slate-500 text-xs -mt-1">Montant du crédit (SMIC horaire × heures)</p>
+      <input class="input" type="number" min="0" value="${s.formation||''}"
+        placeholder="0" onchange="updateIR('formation', parseFloat(this.value)||0)" />
+    </div>
+    <div>
+      <label class="label">Autres crédits d'impôt (€)</label>
+      <input class="input" type="number" min="0" value="${s.autres_credits||''}"
+        placeholder="0" onchange="updateIR('autres_credits', parseFloat(this.value)||0)" />
+    </div>`;
+
+  const pasContent = `
+    <p class="text-slate-500 text-xs -mt-1">Retenues mensuelles employeur + acomptes versés dans l'année</p>
+    <div class="grid ${marie ? 'grid-cols-2' : 'grid-cols-1'} gap-2 mt-1">
+      <div>
+        ${marie ? '<p class="text-slate-500 text-xs mb-1">Vous</p>' : ''}
+        <input class="input" type="number" min="0" value="${s.pas_vous||''}"
+          placeholder="0" onchange="updateIR('pas_vous', parseFloat(this.value)||0)" />
+      </div>
+      ${marie ? `<div>
+        <p class="text-slate-500 text-xs mb-1">Conjoint·e</p>
+        <input class="input" type="number" min="0" value="${s.pas_conjoint||''}"
+          placeholder="0" onchange="updateIR('pas_conjoint', parseFloat(this.value)||0)" />
+      </div>` : ''}
+    </div>`;
+
+  return [
+    irBlock('Situation fiscale', situationContent, { open: true }),
+    irBlock('Revenus', revenusContent, { open: true }),
+    irBlock('Dividendes, plus-values & autres', divPvContent),
+    irBlock('Déductions du revenu', deductionsContent),
+    irBlock('Réductions d\'impôt', reductionsContent),
+    irBlock('Crédits d\'impôt', creditsContent),
+    irBlock('Prélèvements déjà effectués', pasContent, { borderClass: 'border-orange-700/40' }),
+  ].join('\n');
 }
 
 function updateIR(key, value) {
   _irState[key] = value;
+  // Certains changements affectent l'apparence du formulaire (toggle, champs conjoint)
+  if (key === 'salaires_mode' || key === 'situation') {
+    const formEl = document.getElementById('ir-form');
+    if (formEl) formEl.innerHTML = renderIRForm();
+  }
   document.getElementById('ir-results').innerHTML = renderIRResults();
 }
 
 function renderIRResults() {
-  const r = calcIR(_irState);
+  const p = getIRParams();
+  const r = calcIR(p);
 
-  const totalRevenu = (_irState.salaires||0) + (_irState.bic_bnc||0) + (_irState.foncier||0)
-    + (_irState.dividendes_bareme||0) + (_irState.dividendes_pfu||0)
+  const totalRevenu = (_irState.salaires_vous||0) + (_irState.salaires_conjoint||0) + (_irState.bic_bnc||0) + (_irState.foncier||0)
+    + (_irState.micro_foncier||0) + (_irState.dividendes_bareme||0) + (_irState.dividendes_pfu||0)
     + (_irState.pv_bareme||0) + (_irState.pv_pfu||0) + (_irState.autres||0);
 
   if (totalRevenu === 0) {
@@ -842,16 +1088,21 @@ function renderIRResults() {
   <div class="grid grid-cols-3 gap-3 mb-4">
     <div class="bg-slate-800 rounded-xl border border-slate-700 p-3 text-center">
       <p class="text-slate-400 text-xs mb-1">Total impôts</p>
-      <p class="text-xl font-bold text-white">${fmtE(r.totalImpots)}</p>
+      <p class="text-xl font-bold text-white">${fmtE(r.impotFinal)}</p>
     </div>
     <div class="bg-slate-800 rounded-xl border border-slate-700 p-3 text-center">
       <p class="text-slate-400 text-xs mb-1">Taux moyen</p>
       <p class="text-xl font-bold text-orange-400">${fmtPct(r.txMoyen)}</p>
     </div>
+    ${p.pas_preleve > 0 ? `
+    <div class="bg-slate-800 rounded-xl border ${r.resteAPayer >= 0 ? 'border-orange-700/50' : 'border-emerald-700/50'} p-3 text-center">
+      <p class="text-slate-400 text-xs mb-1">${r.resteAPayer >= 0 ? 'Reste à payer' : 'Remboursement'}</p>
+      <p class="text-xl font-bold ${r.resteAPayer >= 0 ? 'text-orange-400' : 'text-emerald-400'}">${r.resteAPayer >= 0 ? fmtE(r.resteAPayer) : fmtE(r.remboursementPAS)}</p>
+    </div>` : `
     <div class="bg-slate-800 rounded-xl border border-slate-700 p-3 text-center">
       <p class="text-slate-400 text-xs mb-1">Taux marginal</p>
       <p class="text-xl font-bold text-red-400">${fmtPct(r.txMarginal, 0)}</p>
-    </div>
+    </div>`}
   </div>
 
   <!-- Barre tranches -->
@@ -882,19 +1133,31 @@ function renderIRResults() {
     <h3 class="font-semibold text-white mb-3">Calcul IR barème</h3>
     <div class="space-y-2 text-sm">
       <div class="flex justify-between">
-        <span class="text-slate-400">Revenu net global imposable</span>
+        <span class="text-slate-400">Revenu net global</span>
         <span class="text-white">${fmtE(r.revenuNetGlobal)}</span>
       </div>
       ${r.abatt10 > 0 ? `<div class="flex justify-between text-xs">
-        <span class="text-slate-500">dont abattement 10% salaires (auto)</span>
+        <span class="text-slate-500">dont abattement 10% salaires${_irState.situation === 'marie' && r.abatt10_conjoint > 0 ? ` (vous ${fmtE(r.abatt10_vous)} + conjoint ${fmtE(r.abatt10_conjoint)})` : ' (auto)'}</span>
         <span class="text-slate-400">−${fmtE(r.abatt10)}</span>
-      </div>` : _irState.salaires > 0 && _irState.salaires_mode === 'net' ? `<div class="flex justify-between text-xs">
+      </div>` : ((_irState.salaires_vous||0) + (_irState.salaires_conjoint||0)) > 0 && _irState.salaires_mode === 'net' ? `<div class="flex justify-between text-xs">
         <span class="text-slate-500">salaires saisis en net fiscal (abattement non recalculé)</span>
         <span class="text-slate-400"></span>
       </div>` : ''}
       ${r.abatt40 > 0 ? `<div class="flex justify-between text-xs">
         <span class="text-slate-500">dont abattement 40% dividendes</span>
         <span class="text-slate-400">−${fmtE(r.abatt40)}</span>
+      </div>` : ''}
+      ${r.abattMicroFoncier > 0 ? `<div class="flex justify-between text-xs">
+        <span class="text-slate-500">dont abattement 30% micro-foncier</span>
+        <span class="text-slate-400">−${fmtE(r.abattMicroFoncier)}</span>
+      </div>` : ''}
+      ${r.deductionPER > 0 ? `<div class="flex justify-between text-xs">
+        <span class="text-slate-500">Déduction PER</span>
+        <span class="text-emerald-400">−${fmtE(r.deductionPER)}</span>
+      </div>
+      <div class="flex justify-between text-xs border-t border-slate-700/50 pt-2">
+        <span class="text-slate-400">Revenu imposable (après PER)</span>
+        <span class="text-white">${fmtE(r.revenuImposable)}</span>
       </div>` : ''}
       <div class="flex justify-between">
         <span class="text-slate-400">Parts fiscales</span>
@@ -942,6 +1205,82 @@ function renderIRResults() {
     <p class="text-xs text-slate-500 mt-2">Dont prélèvements sociaux 17,2% inclus dans le PFU.</p>
   </div>` : ''}
 
+  <!-- Prélèvements sociaux hors PFU -->
+  ${r.totalPS > 0 ? `
+  <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 mb-4">
+    <h3 class="font-semibold text-white mb-3">Prélèvements sociaux (17,2%)</h3>
+    <div class="space-y-2 text-sm">
+      ${r.psFoncier > 0 ? `
+      <div class="flex justify-between">
+        <span class="text-slate-400">Revenus fonciers nets (${fmtE((_irState.foncier||0) + r.microFoncierNet)})</span>
+        <span class="text-white">${fmtE(r.psFoncier)}</span>
+      </div>
+      <div class="flex justify-between text-xs">
+        <span class="text-slate-500">dont CSG 9,2%</span>
+        <span class="text-slate-400">${fmtE(r.psFoncierCSG)}</span>
+      </div>
+      <div class="flex justify-between text-xs">
+        <span class="text-slate-500">dont CRDS 0,5%</span>
+        <span class="text-slate-400">${fmtE(r.psFoncierCRDS)}</span>
+      </div>
+      <div class="flex justify-between text-xs">
+        <span class="text-slate-500">dont prélèvement de solidarité 7,5%</span>
+        <span class="text-slate-400">${fmtE(r.psFoncierSol)}</span>
+      </div>` : ''}
+      ${r.psDivBareme > 0 ? `
+      <div class="flex justify-between ${r.psFoncier > 0 ? 'border-t border-slate-700/50 pt-2' : ''}">
+        <span class="text-slate-400">Dividendes option barème (brut ${fmtE(_irState.dividendes_bareme||0)})</span>
+        <span class="text-white">${fmtE(r.psDivBareme)}</span>
+      </div>` : ''}
+      <div class="flex justify-between font-semibold border-t border-slate-700/50 pt-2">
+        <span class="text-slate-300">Total PS</span>
+        <span class="text-orange-300">${fmtE(r.totalPS)}</span>
+      </div>
+    </div>
+  </div>` : ''}
+
+  <!-- Réductions & Crédits -->
+  ${(r.totalReductions > 0 || r.totalCredits > 0) ? `
+  <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 mb-4">
+    <h3 class="font-semibold text-white mb-3">Réductions & Crédits d'impôt</h3>
+    <div class="space-y-2 text-sm">
+      ${r.totalReductions > 0 ? `
+      <p class="text-xs text-slate-500 uppercase tracking-wide font-medium">Réductions (non remboursables)</p>
+      ${r.reductionDons > 0 ? `<div class="flex justify-between">
+        <span class="text-slate-400">Dons (66% de ${fmtE(r.donsEffectifs)})</span>
+        <span class="text-emerald-400">−${fmtE(r.reductionDons)}</span>
+      </div>` : ''}
+      ${r.reductionScol > 0 ? `<div class="flex justify-between">
+        <span class="text-slate-400">Scolarité (collège/lycée/supérieur)</span>
+        <span class="text-emerald-400">−${fmtE(r.reductionScol)}</span>
+      </div>` : ''}
+      ` : ''}
+      ${r.totalCredits > 0 ? `
+      <p class="text-xs text-slate-500 uppercase tracking-wide font-medium mt-2">Crédits (remboursables)</p>
+      ${r.creditGarde > 0 ? `<div class="flex justify-between">
+        <span class="text-slate-400">Garde d'enfants (50%)</span>
+        <span class="text-emerald-400">−${fmtE(r.creditGarde)}</span>
+      </div>` : ''}
+      ${r.creditDomicile > 0 ? `<div class="flex justify-between">
+        <span class="text-slate-400">Emploi à domicile (50%)</span>
+        <span class="text-emerald-400">−${fmtE(r.creditDomicile)}</span>
+      </div>` : ''}
+      ${r.creditFormation > 0 ? `<div class="flex justify-between">
+        <span class="text-slate-400">Formation dirigeant</span>
+        <span class="text-emerald-400">−${fmtE(r.creditFormation)}</span>
+      </div>` : ''}
+      ${r.creditAutres > 0 ? `<div class="flex justify-between">
+        <span class="text-slate-400">Autres crédits</span>
+        <span class="text-emerald-400">−${fmtE(r.creditAutres)}</span>
+      </div>` : ''}
+      ${r.remboursementCredits > 0 ? `<div class="flex justify-between text-xs border-t border-slate-700/50 pt-2">
+        <span class="text-slate-500">Excédent de crédits remboursé</span>
+        <span class="text-blue-400">+${fmtE(r.remboursementCredits)}</span>
+      </div>` : ''}
+      ` : ''}
+    </div>
+  </div>` : ''}
+
   <!-- Récapitulatif final -->
   <div class="bg-blue-900/20 rounded-xl border border-blue-700/50 p-4">
     <h3 class="font-semibold text-white mb-3">Récapitulatif</h3>
@@ -951,12 +1290,29 @@ function renderIRResults() {
         <span class="text-white">${fmtE(r.impotNet)}</span>
       </div>
       ${r.cehr > 0 ? `<div class="flex justify-between"><span class="text-slate-400">CEHR</span><span class="text-white">${fmtE(r.cehr)}</span></div>` : ''}
-      ${r.totalPFU > 0 ? `<div class="flex justify-between"><span class="text-slate-400">PFU (dont PS)</span><span class="text-white">${fmtE(r.totalPFU)}</span></div>` : ''}
+      ${r.totalReductions > 0 ? `<div class="flex justify-between"><span class="text-slate-400">Réductions d'impôt</span><span class="text-emerald-400">−${fmtE(r.totalReductions)}</span></div>` : ''}
+      ${r.totalCredits > 0 ? `<div class="flex justify-between"><span class="text-slate-400">Crédits d'impôt</span><span class="text-emerald-400">−${fmtE(r.totalCredits)}</span></div>` : ''}
+      ${r.totalPS > 0 ? `<div class="flex justify-between"><span class="text-slate-400">Prélèvements sociaux 17,2%</span><span class="text-white">${fmtE(r.totalPS)}</span></div>` : ''}
+      ${r.totalPFU > 0 ? `<div class="flex justify-between"><span class="text-slate-400">PFU (dont PS inclus)</span><span class="text-white">${fmtE(r.totalPFU)}</span></div>` : ''}
       <div class="flex justify-between text-base font-bold border-t border-blue-700/50 pt-2">
         <span class="text-white">Total impôts & prélèvements</span>
-        <span class="text-blue-300">${fmtE(r.totalImpots)}</span>
+        <span class="text-blue-300">${fmtE(r.impotFinal)}</span>
       </div>
+      ${p.pas_preleve > 0 ? `
+      <div class="flex justify-between border-t border-slate-700/50 pt-2">
+        <span class="text-slate-400">Prélèvement à la source déjà payé</span>
+        <span class="text-slate-300">−${fmtE(p.pas_preleve)}</span>
+      </div>
+      <div class="flex justify-between text-base font-bold pt-1 ${r.resteAPayer >= 0 ? 'text-orange-300' : 'text-emerald-400'}">
+        <span>${r.resteAPayer >= 0 ? 'Reste à payer' : 'Remboursement attendu'}</span>
+        <span>${r.resteAPayer >= 0 ? fmtE(r.resteAPayer) : fmtE(r.remboursementPAS)}</span>
+      </div>` : ''}
+      ${r.remboursementCredits > 0 && p.pas_preleve === 0 ? `
       <div class="flex justify-between text-xs pt-1">
+        <span class="text-slate-500">Remboursement crédits excédentaires</span>
+        <span class="text-blue-400">${fmtE(r.remboursementCredits)}</span>
+      </div>` : ''}
+      <div class="flex justify-between text-xs pt-1 border-t border-slate-700/50">
         <span class="text-slate-500">Taux moyen global</span>
         <span class="text-slate-300">${fmtPct(r.txMoyen)}</span>
       </div>
@@ -972,20 +1328,177 @@ function renderIRResults() {
   </div>`;
 }
 
-async function saveSimulationIR() {
-  const nom = prompt('Nom de la simulation :', `Simulation ${new Date().getFullYear()}`);
-  if (!nom) return;
-  const sim = {
-    id:         uid(),
+// ─── SIMULATIONS IR — LOCALSTORAGE ───────────────────────────────────────────
+
+const LS_SIMUL_KEY = 'portfoliopro_simulations_ir';
+let _currentSimId  = null; // ID de la simulation actuellement chargée (null = nouvelle)
+
+function lsGetSimulations() {
+  try { return JSON.parse(localStorage.getItem(LS_SIMUL_KEY)) || []; }
+  catch { return []; }
+}
+
+function lsSaveSimulations(list) {
+  localStorage.setItem(LS_SIMUL_KEY, JSON.stringify(list));
+}
+
+function _buildSimObject(id, nom) {
+  const p = getIRParams();
+  const r = calcIR(p);
+  return {
+    id,
     nom,
-    annee:      new Date().getFullYear(),
-    situation:  _irState.situation,
-    nb_enfants: _irState.nbEnfants,
-    revenus:    JSON.stringify(_irState),
     created_at: new Date().toISOString(),
+    state:      { ..._irState },
+    summary: {
+      annee:      _irState.annee,
+      situation:  _irState.situation,
+      nbEnfants:  _irState.nbEnfants,
+      impotFinal: r.impotFinal,
+      txMoyen:    r.txMoyen,
+    },
   };
-  if (!STATE.simulations_ir) STATE.simulations_ir = [];
-  STATE.simulations_ir.push(sim);
-  try { await API.saveSimulationIR(sim); } catch(e) { console.warn('saveSimulationIR:', e); }
-  alert('Simulation sauvegardée.');
+}
+
+function _flashBtn(id, msg, restore) {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  btn.textContent = msg;
+  setTimeout(() => { btn.textContent = restore; }, 1500);
+}
+
+function _refreshSaveButtons() {
+  const wrap = document.getElementById('ir-save-btns');
+  if (!wrap) return;
+  if (_currentSimId) {
+    const list = lsGetSimulations();
+    const cur  = list.find(s => s.id === _currentSimId);
+    wrap.innerHTML = `
+      <button id="btn-update-ir" onclick="updateSimulationIR()" class="btn-primary text-sm">💾 Mettre à jour</button>
+      <button id="btn-save-ir"   onclick="saveSimulationIR()"   class="btn-secondary text-sm">+ Nouvelle copie</button>`;
+    // Afficher le nom de la simu chargée
+    const subtitle2 = document.getElementById('ir-simname');
+    if (subtitle2 && cur) subtitle2.textContent = `📂 ${cur.nom}`;
+  } else {
+    wrap.innerHTML = `
+      <button id="btn-save-ir" onclick="saveSimulationIR()" class="btn-primary text-sm">💾 Sauvegarder</button>`;
+    const subtitle2 = document.getElementById('ir-simname');
+    if (subtitle2) subtitle2.textContent = '';
+  }
+}
+
+function saveSimulationIR() {
+  const defaultNom = `Simulation ${_irState.annee}`;
+  const nom = prompt('Nom de la simulation :', defaultNom);
+  if (nom === null) return;
+  const sim = _buildSimObject(uid(), nom.trim() || defaultNom);
+  const list = lsGetSimulations();
+  list.unshift(sim);
+  lsSaveSimulations(list);
+  _currentSimId = sim.id;
+  _refreshSaveButtons();
+  _flashBtn('btn-update-ir', '✓ Sauvegardé', '💾 Mettre à jour');
+}
+
+function updateSimulationIR() {
+  if (!_currentSimId) { saveSimulationIR(); return; }
+  const list = lsGetSimulations();
+  const idx  = list.findIndex(s => s.id === _currentSimId);
+  if (idx === -1) { saveSimulationIR(); return; }
+  const updated = _buildSimObject(_currentSimId, list[idx].nom);
+  updated.created_at = list[idx].created_at; // conserver la date d'origine
+  updated.updated_at = new Date().toISOString();
+  list[idx] = updated;
+  lsSaveSimulations(list);
+  _flashBtn('btn-update-ir', '✓ Mis à jour', '💾 Mettre à jour');
+}
+
+function openSimulationsIR() {
+  const list = lsGetSimulations();
+
+  const rows = list.length === 0
+    ? `<p class="text-slate-500 text-sm text-center py-6">Aucune simulation sauvegardée.</p>`
+    : list.map(s => {
+        const isCurrent = s.id === _currentSimId;
+        const date = new Date(s.created_at).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' });
+        const updDate = s.updated_at ? ' · maj ' + new Date(s.updated_at).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' }) : '';
+        const sitLabel = { celibataire: 'Célibataire', marie: 'Marié/Pacsé', veuf: 'Veuf' }[s.summary?.situation] || '';
+        const enfants  = s.summary?.nbEnfants > 0 ? ` · ${s.summary.nbEnfants} enf.` : '';
+        return `
+        <div class="flex items-center justify-between gap-3 py-3 border-b border-slate-700/50 last:border-0 ${isCurrent ? 'bg-blue-900/10 -mx-4 px-4 rounded' : ''}">
+          <div class="min-w-0">
+            <p class="text-sm font-medium truncate ${isCurrent ? 'text-blue-300' : 'text-white'}">${s.nom}${isCurrent ? ' <span class="text-xs font-normal opacity-70">(en cours)</span>' : ''}</p>
+            <p class="text-slate-500 text-xs mt-0.5">${date}${updDate} · ${sitLabel}${enfants}</p>
+          </div>
+          <div class="text-right shrink-0">
+            <p class="text-white text-sm font-semibold">${fmtE(s.summary?.impotFinal ?? 0)}</p>
+            <p class="text-slate-500 text-xs">${fmtPct(s.summary?.txMoyen ?? 0)}</p>
+          </div>
+          <div class="flex gap-2 shrink-0">
+            ${isCurrent ? '' : `<button onclick="loadSimulationIR('${s.id}')" class="btn-secondary text-xs px-2 py-1">Charger</button>`}
+            <button onclick="renameSimulationIR('${s.id}')" class="btn-secondary text-xs px-2 py-1">✏</button>
+            <button onclick="deleteSimulationIR('${s.id}')" class="btn-danger text-xs px-2 py-1">✕</button>
+          </div>
+        </div>`;
+      }).join('');
+
+  document.body.insertAdjacentHTML('beforeend', `
+  <div id="simul-modal" class="modal-backdrop" onclick="if(event.target===this)closeSimulationsIR()">
+    <div class="modal-box" style="max-width:36rem">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-base font-semibold text-white">Simulations sauvegardées</h3>
+        <button onclick="closeSimulationsIR()" class="text-slate-400 hover:text-white text-lg leading-none">✕</button>
+      </div>
+      <div>${rows}</div>
+    </div>
+  </div>`);
+}
+
+function closeSimulationsIR() {
+  document.getElementById('simul-modal')?.remove();
+}
+
+function loadSimulationIR(id) {
+  const list = lsGetSimulations();
+  const sim  = list.find(s => s.id === id);
+  if (!sim) return;
+  Object.assign(_irState, sim.state);
+  _currentSimId = id;
+  closeSimulationsIR();
+  const formEl = document.getElementById('ir-form');
+  if (formEl) formEl.innerHTML = renderIRForm();
+  document.getElementById('ir-results').innerHTML = renderIRResults();
+  document.getElementById('ir-subtitle').textContent = BAREMES[_irState.annee]?.label || '';
+  _refreshSaveButtons();
+}
+
+function renameSimulationIR(id) {
+  const list = lsGetSimulations();
+  const sim  = list.find(s => s.id === id);
+  if (!sim) return;
+  const nom = prompt('Nouveau nom :', sim.nom);
+  if (nom === null) return;
+  const label = nom.trim();
+  if (!label || label === sim.nom) return;
+  sim.nom = label;
+  lsSaveSimulations(list);
+  // Mettre à jour le libellé affiché si c'est la simu courante
+  if (_currentSimId === id) {
+    const el = document.getElementById('ir-simname');
+    if (el) el.textContent = '📂 ' + label;
+  }
+  closeSimulationsIR();
+  openSimulationsIR();
+}
+
+function deleteSimulationIR(id) {
+  if (!confirm('Supprimer cette simulation ?')) return;
+  const list = lsGetSimulations().filter(s => s.id !== id);
+  lsSaveSimulations(list);
+  if (_currentSimId === id) {
+    _currentSimId = null;
+    _refreshSaveButtons();
+  }
+  closeSimulationsIR();
+  openSimulationsIR();
 }
