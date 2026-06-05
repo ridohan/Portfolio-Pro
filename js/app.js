@@ -1189,6 +1189,7 @@ function renderSocBilan(soc) {
           <button onclick="togglePaiement('${m.id}',${enc.anneeFact},${enc.moisFact},'${soc.id}')"
             class="text-xs px-1.5 py-0 rounded ${btnCls} transition-colors leading-4"
             title="${btnTitle}">${btnIcon}</button>
+          <div class="text-slate-500 text-xs mt-0.5 leading-3">Fact. ${moisLabels[enc.moisFact-1]}${enc.anneeFact !== annee ? ' '+enc.anneeFact : ''}</div>
         </div>
       </td>`;
     }).join('');
