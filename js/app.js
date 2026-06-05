@@ -4,6 +4,7 @@ const STATE_DEFAULTS = {
   societes: [],
   missions: [],
   cra_entries: [],
+  depenses: [],
   simulations_ir: [],
   exercices_fiscaux: [],
 };
@@ -462,6 +463,7 @@ function renderSocieteDetail(app, id) {
     { key: 'fiche',    label: 'Fiche' },
     { key: 'missions', label: `Missions (${getMissionsActives(id).length})` },
     { key: 'cra',      label: 'CRA Prévisionnel' },
+    { key: 'bilan',    label: 'Bilan comptable' },
   ];
   const tabsHtml = tabs.map(t => `
     <button onclick="switchSocTab('${t.key}','${id}')"
@@ -475,6 +477,7 @@ function renderSocieteDetail(app, id) {
   if      (_socTab === 'fiche')    content = renderSocFiche(soc);
   else if (_socTab === 'missions') content = renderSocMissions(soc);
   else if (_socTab === 'cra')      content = renderSocCRA(soc);
+  else if (_socTab === 'bilan')    content = renderSocBilan(soc);
 
   app.innerHTML = `
   ${navBar('societes')}
@@ -942,6 +945,413 @@ function overrideCRADispo(missionId, annee, mois, societeId) {
   if (val === null) return; // annulé
   const override = val.trim() === '' ? null : (parseInt(val) || null);
   saveCRAEntry(missionId, annee, mois, 'jours_dispo_override', override, societeId);
+  renderSocieteDetail(document.getElementById('app'), societeId);
+}
+
+// ─── BILAN COMPTABLE — CALCULS ───────────────────────────────────────────────
+
+let _bilanAnnee = new Date().getFullYear();
+
+function setBilanYear(delta, socId) {
+  _bilanAnnee += delta;
+  renderSocieteDetail(document.getElementById('app'), socId);
+}
+
+function getDepenses(societeId) {
+  return (STATE.depenses || []).filter(d => d.societe_id === societeId && d.actif !== false);
+}
+
+// Retourne le montant HT de la dépense pour un mois/année donné (0 si hors période ou hors cycle)
+function calcDepenseMois(dep, annee, mois) {
+  // Vérifier période active
+  if (dep.mois_debut) {
+    if (annee < dep.mois_debut.annee) return 0;
+    if (annee === dep.mois_debut.annee && mois < dep.mois_debut.mois) return 0;
+  }
+  if (dep.mois_fin) {
+    if (annee > dep.mois_fin.annee) return 0;
+    if (annee === dep.mois_fin.annee && mois > dep.mois_fin.mois) return 0;
+  }
+  const startMois = dep.mois_debut?.mois || 1;
+  switch (dep.periodicite) {
+    case 'mensuelle':      return dep.montant_ht;
+    case 'trimestrielle':  return ((mois - startMois + 12) % 3  === 0) ? dep.montant_ht : 0;
+    case 'semestrielle':   return ((mois - startMois + 12) % 6  === 0) ? dep.montant_ht : 0;
+    case 'annuelle':       return mois === startMois             ? dep.montant_ht : 0;
+    case 'ponctuelle':
+      return (dep.mois_debut && dep.mois_debut.annee === annee && dep.mois_debut.mois === mois)
+        ? dep.montant_ht : 0;
+    default: return 0;
+  }
+}
+
+// Encaissements prévisionnels pour un mois/année (CA facturé décalé du délai de paiement)
+function calcEncaissementsMois(societeId, annee, mois) {
+  const missions = getMissionsActives(societeId);
+  let totalHT = 0, totalTTC = 0;
+  const detail = [];
+  missions.forEach(m => {
+    const decalage = Math.round((m.delai_paiement || 30) / 30);
+    // Quel mois a été facturé pour être encaissé ce mois-ci ?
+    let mFact = mois - decalage;
+    let aFact = annee;
+    while (mFact <= 0) { mFact += 12; aFact--; }
+    if (isMoisHorsMission(m, aFact, mFact)) return;
+    const c = calcCRACell(m, aFact, mFact);
+    if (c.caHT > 0) {
+      totalHT  += c.caHT;
+      totalTTC += c.caTTC;
+      detail.push({ client: m.client, caHT: c.caHT, caTTC: c.caTTC, moisFact: mFact, anneeFact: aFact, tva: m.tva });
+    }
+  });
+  return { totalHT, totalTTC, detail };
+}
+
+// Totaux annuels revenus
+function calcEncaissementsAnnee(societeId, annee) {
+  let caHT = 0, caTTC = 0;
+  for (let m = 1; m <= 12; m++) {
+    const e = calcEncaissementsMois(societeId, annee, m);
+    caHT += e.totalHT; caTTC += e.totalTTC;
+  }
+  return { caHT, caTTC };
+}
+
+// Totaux annuels dépenses
+function calcDepensesAnnee(societeId, annee) {
+  const deps = getDepenses(societeId);
+  let totalHT = 0, totalTTC = 0;
+  deps.forEach(d => {
+    for (let m = 1; m <= 12; m++) {
+      const ht = calcDepenseMois(d, annee, m);
+      totalHT  += ht;
+      totalTTC += ht * (1 + (d.tva_taux || 0));
+    }
+  });
+  return { totalHT, totalTTC };
+}
+
+// ─── BILAN — RENDU ───────────────────────────────────────────────────────────
+
+const CATS_DEPENSE = [
+  { value: 'loyer',      label: 'Loyer & charges locatives' },
+  { value: 'logiciel',   label: 'Logiciels & abonnements' },
+  { value: 'materiel',   label: 'Matériel & équipement' },
+  { value: 'deplacement',label: 'Déplacements & frais' },
+  { value: 'compta',     label: 'Comptabilité & juridique' },
+  { value: 'social',     label: 'Charges sociales TNS' },
+  { value: 'soustraitance', label: 'Sous-traitance' },
+  { value: 'autre',      label: 'Autre' },
+];
+const CAT_LABEL = Object.fromEntries(CATS_DEPENSE.map(c => [c.value, c.label]));
+
+function renderSocBilan(soc) {
+  const annee    = _bilanAnnee;
+  const missions = getMissionsActives(soc.id);
+  const depenses = getDepenses(soc.id);
+  const moisLabels = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
+  const now = new Date();
+  const moisCourant = now.getMonth() + 1;
+  const anneeCourante = now.getFullYear();
+
+  // ── Pré-calcul par mois ──────────────────────────────────────────────────
+  const moisData = Array.from({ length: 12 }, (_, i) => {
+    const mois = i + 1;
+    const enc  = calcEncaissementsMois(soc.id, annee, mois);
+    const deps = depenses.map(d => ({ dep: d, ht: calcDepenseMois(d, annee, mois) }));
+    const totDepsHT  = deps.reduce((s, x) => s + x.ht, 0);
+    const totDepsTTC = deps.reduce((s, x) => s + x.ht * (1 + (x.dep.tva_taux || 0)), 0);
+    return { mois, enc, deps, totDepsHT, totDepsTTC,
+             resultatHT: enc.totalHT - totDepsHT };
+  });
+
+  const totEnc  = calcEncaissementsAnnee(soc.id, annee);
+  const totDeps = calcDepensesAnnee(soc.id, annee);
+  const totRes  = totEnc.caHT - totDeps.totalHT;
+
+  // ── CSS helpers ──────────────────────────────────────────────────────────
+  const TH = (cur) => `px-3 py-2 text-center text-xs font-semibold border-r border-slate-700 min-w-[90px] ${cur ? 'bg-blue-900/40 text-blue-200' : 'bg-slate-700 text-slate-200'}`;
+  const TD = (cur, extra = '') => `px-3 py-2 text-center text-sm border-r border-slate-600 ${cur ? 'bg-blue-950/40' : ''} ${extra}`;
+  const TDL = `px-3 py-2 text-left text-xs border-r border-slate-700 sticky left-0 z-10`;
+
+  const thead = `
+  <thead>
+    <tr class="border-b-2 border-slate-500">
+      <th class="${TDL} bg-slate-700 text-slate-300 font-semibold min-w-[210px]"></th>
+      ${moisLabels.map((l, i) => `<th class="${TH(annee === anneeCourante && i+1 === moisCourant)}">${l}</th>`).join('')}
+      <th class="px-3 py-2 text-center text-xs font-bold bg-slate-600 text-white border-r border-slate-500 min-w-[100px]">Total</th>
+    </tr>
+  </thead>`;
+
+  // ── Section REVENUS ──────────────────────────────────────────────────────
+  // Ligne de revenus par mission
+  const missionEncRows = missions.map(m => {
+    const decalage = Math.round((m.delai_paiement || 30) / 30);
+    const cells = moisData.map(md => {
+      const isCur = annee === anneeCourante && md.mois === moisCourant;
+      const enc = md.enc.detail.find(d => d.client === m.client);
+      const val = enc ? enc.caHT : 0;
+      return `<td class="${TD(isCur, 'bg-slate-800/30')}">${val > 0 ? `<span class="text-slate-200">${fmtE(val)}</span>` : '<span class="text-slate-700">—</span>'}</td>`;
+    }).join('');
+    // Total annuel encaissé pour cette mission
+    let totM = 0;
+    moisData.forEach(md => {
+      const enc = md.enc.detail.find(d => d.client === m.client);
+      if (enc) totM += enc.caHT;
+    });
+    return `<tr class="border-b border-slate-700/40">
+      <td class="${TDL} bg-slate-800/30 text-slate-400 pl-6">${m.client}
+        ${decalage > 0 ? `<span class="ml-1 text-slate-600 text-xs">+${decalage}m</span>` : ''}
+      </td>
+      ${cells}
+      <td class="px-3 py-2 text-center text-sm border-r border-slate-500 bg-slate-700/40 font-medium text-slate-200">${totM > 0 ? fmtE(totM) : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  const revenusRow = `
+  <tr class="border-b border-slate-500 bg-emerald-950/40">
+    <td class="${TDL} bg-emerald-950/60 text-emerald-300 font-bold text-sm">💰 Revenus encaissés HT</td>
+    ${moisData.map(md => {
+      const isCur = annee === anneeCourante && md.mois === moisCourant;
+      return `<td class="${TD(isCur, 'font-bold')}">
+        ${md.enc.totalHT > 0 ? `<span class="text-emerald-400">${fmtE(md.enc.totalHT)}</span>` : '<span class="text-slate-700">—</span>'}
+      </td>`;
+    }).join('')}
+    <td class="px-3 py-2 text-center font-bold border-r border-slate-500 bg-emerald-900/40 text-emerald-300">${fmtE(totEnc.caHT)}</td>
+  </tr>`;
+
+  // ── Section DÉPENSES ─────────────────────────────────────────────────────
+  // Regrouper par catégorie
+  const cats = [...new Set(depenses.map(d => d.categorie))];
+  const depRows = depenses.length === 0
+    ? `<tr><td colspan="${14}" class="px-3 py-4 text-center text-slate-600 text-sm italic">Aucune dépense renseignée</td></tr>`
+    : depenses.map(dep => {
+        const cells = moisData.map(md => {
+          const isCur = annee === anneeCourante && md.mois === moisCourant;
+          const ht = calcDepenseMois(dep, annee, md.mois);
+          return `<td class="${TD(isCur, 'bg-slate-800/20')}">${ht > 0 ? `<span class="text-red-300">${fmtE(ht)}</span>` : '<span class="text-slate-700">—</span>'}</td>`;
+        }).join('');
+        let totD = 0;
+        for (let m = 1; m <= 12; m++) totD += calcDepenseMois(dep, annee, m);
+        return `<tr class="border-b border-slate-700/40 group">
+          <td class="${TDL} bg-slate-800/20 pl-6">
+            <div class="flex items-center justify-between gap-2">
+              <div>
+                <span class="text-slate-300 text-xs">${dep.label}</span>
+                <span class="ml-1 text-slate-600 text-xs">${_perioLabel(dep.periodicite)}</span>
+              </div>
+              <div class="hidden group-hover:flex gap-1 shrink-0">
+                <button onclick="openDepenseModal('${soc.id}','${dep.id}')" class="text-slate-500 hover:text-slate-200 text-xs px-1">✏</button>
+                <button onclick="deleteDepense('${dep.id}','${soc.id}')" class="text-red-700 hover:text-red-400 text-xs px-1">✕</button>
+              </div>
+            </div>
+          </td>
+          ${cells}
+          <td class="px-3 py-2 text-center text-sm border-r border-slate-500 bg-slate-700/30 font-medium text-red-300">${totD > 0 ? fmtE(totD) : '—'}</td>
+        </tr>`;
+      }).join('');
+
+  const depTotRow = `
+  <tr class="border-b border-slate-500 bg-red-950/40">
+    <td class="${TDL} bg-red-950/60 text-red-300 font-bold text-sm">📤 Total dépenses HT</td>
+    ${moisData.map(md => {
+      const isCur = annee === anneeCourante && md.mois === moisCourant;
+      return `<td class="${TD(isCur, 'font-bold')}">
+        ${md.totDepsHT > 0 ? `<span class="text-red-400">${fmtE(md.totDepsHT)}</span>` : '<span class="text-slate-700">—</span>'}
+      </td>`;
+    }).join('')}
+    <td class="px-3 py-2 text-center font-bold border-r border-slate-500 bg-red-900/40 text-red-300">${totDeps.totalHT > 0 ? fmtE(totDeps.totalHT) : '—'}</td>
+  </tr>`;
+
+  // ── Section RÉSULTAT ─────────────────────────────────────────────────────
+  const resultatRow = `
+  <tr class="border-b-2 border-slate-400">
+    <td class="${TDL} bg-slate-700 text-white font-bold text-sm">📊 Résultat brut HT</td>
+    ${moisData.map(md => {
+      const isCur = annee === anneeCourante && md.mois === moisCourant;
+      const res = md.resultatHT;
+      const color = res > 0 ? 'text-emerald-400' : res < 0 ? 'text-red-400' : 'text-slate-500';
+      return `<td class="${TD(isCur, 'bg-slate-700 font-bold')}">
+        <span class="${color}">${res !== 0 ? fmtE(res) : '—'}</span>
+      </td>`;
+    }).join('')}
+    <td class="px-3 py-2 text-center font-bold border-r border-slate-500 bg-slate-600">
+      <span class="${totRes > 0 ? 'text-emerald-400' : totRes < 0 ? 'text-red-400' : 'text-slate-400'} text-base">${fmtE(totRes)}</span>
+    </td>
+  </tr>`;
+
+  // ── KPIs résumé ──────────────────────────────────────────────────────────
+  const tauxCharges = totEnc.caHT > 0 ? Math.round(totDeps.totalHT / totEnc.caHT * 100) : 0;
+  const kpis = `
+  <div class="grid grid-cols-3 gap-4 mb-4">
+    <div class="bg-emerald-950/40 border border-emerald-800/40 rounded-xl p-4">
+      <div class="text-emerald-500 text-xs uppercase tracking-wide mb-1">Revenus encaissés</div>
+      <div class="text-emerald-300 font-bold text-xl">${fmtE(totEnc.caHT)}</div>
+      ${totEnc.caTTC !== totEnc.caHT ? `<div class="text-emerald-700 text-xs mt-0.5">${fmtE(totEnc.caTTC)} TTC</div>` : ''}
+    </div>
+    <div class="bg-red-950/30 border border-red-800/30 rounded-xl p-4">
+      <div class="text-red-500 text-xs uppercase tracking-wide mb-1">Dépenses</div>
+      <div class="text-red-300 font-bold text-xl">${fmtE(totDeps.totalHT)}</div>
+      <div class="text-slate-600 text-xs mt-0.5">${tauxCharges}% du CA</div>
+    </div>
+    <div class="border rounded-xl p-4 ${totRes >= 0 ? 'bg-blue-950/30 border-blue-800/30' : 'bg-red-950/40 border-red-700/40'}">
+      <div class="${totRes >= 0 ? 'text-blue-400' : 'text-red-400'} text-xs uppercase tracking-wide mb-1">Résultat brut</div>
+      <div class="${totRes >= 0 ? 'text-white' : 'text-red-300'} font-bold text-xl">${fmtE(totRes)}</div>
+      <div class="text-slate-600 text-xs mt-0.5">avant charges sociales & impôts</div>
+    </div>
+  </div>`;
+
+  return `
+  <div class="flex items-center justify-between mb-4">
+    <div class="flex items-center gap-3">
+      <button onclick="setBilanYear(-1,'${soc.id}')" class="btn-secondary text-sm px-3 py-1">←</button>
+      <span class="text-white font-bold text-xl">${annee}</span>
+      <button onclick="setBilanYear(1,'${soc.id}')" class="btn-secondary text-sm px-3 py-1">→</button>
+    </div>
+    <button onclick="openDepenseModal('${soc.id}',null)" class="btn-primary text-sm">+ Ajouter une dépense</button>
+  </div>
+  ${kpis}
+  <div class="overflow-x-auto rounded-xl border border-slate-600 shadow-xl mb-6">
+    <table class="w-full text-sm border-collapse" style="min-width:${210 + 12*90 + 100}px">
+      ${thead}
+      <tbody>
+        <!-- REVENUS -->
+        <tr class="bg-slate-700/80 border-b border-slate-500">
+          <td colspan="${14}" class="px-3 py-1.5 text-xs font-bold text-emerald-400 uppercase tracking-wider sticky left-0 bg-slate-700/80">Revenus</td>
+        </tr>
+        ${missions.length > 0 ? missionEncRows : '<tr><td colspan="14" class="px-3 py-3 text-center text-slate-600 text-xs italic pl-6">Aucune mission active — configurez vos missions dans l\'onglet CRA</td></tr>'}
+        ${revenusRow}
+        <!-- DÉPENSES -->
+        <tr class="bg-slate-700/80 border-b border-slate-500">
+          <td colspan="${14}" class="px-3 py-1.5 text-xs font-bold text-red-400 uppercase tracking-wider sticky left-0 bg-slate-700/80">Dépenses</td>
+        </tr>
+        ${depRows}
+        ${depTotRow}
+        <!-- RÉSULTAT -->
+        ${resultatRow}
+      </tbody>
+    </table>
+  </div>`;
+}
+
+function _perioLabel(p) {
+  return { mensuelle: '/mois', trimestrielle: '/trim.', semestrielle: '/sem.', annuelle: '/an', ponctuelle: '1×' }[p] || '';
+}
+
+// ─── DÉPENSES — CRUD ─────────────────────────────────────────────────────────
+
+function openDepenseModal(societeId, depenseId) {
+  const dep = depenseId ? (STATE.depenses || []).find(d => d.id === depenseId) : null;
+  const now = new Date();
+  const v = dep || {
+    id: uid(), societe_id: societeId, label: '', montant_ht: '', tva_taux: 0.20,
+    categorie: 'logiciel', periodicite: 'mensuelle', actif: true,
+    mois_debut: { annee: now.getFullYear(), mois: now.getMonth() + 1 }, mois_fin: null,
+  };
+
+  const catsOptions = CATS_DEPENSE.map(c =>
+    `<option value="${c.value}" ${v.categorie === c.value ? 'selected' : ''}>${c.label}</option>`
+  ).join('');
+
+  const periodOptions = [
+    ['mensuelle','Mensuelle'],['trimestrielle','Trimestrielle'],
+    ['semestrielle','Semestrielle'],['annuelle','Annuelle'],['ponctuelle','Ponctuelle (1 fois)'],
+  ].map(([val, lbl]) => `<option value="${val}" ${v.periodicite === val ? 'selected' : ''}>${lbl}</option>`).join('');
+
+  document.body.insertAdjacentHTML('beforeend', `
+  <div id="dep-modal" class="modal-backdrop" onclick="if(event.target===this)closeDepenseModal()">
+    <div class="modal-box">
+      <h3 class="text-base font-semibold text-white mb-4">${dep ? 'Modifier' : 'Nouvelle'} dépense</h3>
+      <div class="space-y-3">
+        <div>
+          <label class="label">Libellé *</label>
+          <input id="dep-label" class="input" value="${v.label}" placeholder="Ex : Loyer bureau, Abonnement Notion…" />
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="label">Montant HT (€) *</label>
+            <input id="dep-montant" class="input" type="number" min="0" step="0.01" value="${v.montant_ht || ''}" placeholder="0" />
+          </div>
+          <div>
+            <label class="label">TVA applicable</label>
+            <div class="flex gap-2 mt-1">
+              <button id="dep-tva-oui" onclick="document.getElementById('dep-tva-val').value='0.20';document.getElementById('dep-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('dep-tva-non').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
+                class="flex-1 text-xs py-1.5 rounded ${v.tva_taux > 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">20%</button>
+              <button id="dep-tva-non" onclick="document.getElementById('dep-tva-val').value='0';document.getElementById('dep-tva-non').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('dep-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
+                class="flex-1 text-xs py-1.5 rounded ${v.tva_taux === 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">Non</button>
+            </div>
+            <input type="hidden" id="dep-tva-val" value="${v.tva_taux}" />
+          </div>
+        </div>
+        <div>
+          <label class="label">Catégorie</label>
+          <select id="dep-cat" class="input">${catsOptions}</select>
+        </div>
+        <div>
+          <label class="label">Périodicité</label>
+          <select id="dep-perio" class="input">${periodOptions}</select>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="label">Mois de début *</label>
+            <input id="dep-debut" class="input" type="month" value="${v.mois_debut ? v.mois_debut.annee+'-'+String(v.mois_debut.mois).padStart(2,'0') : ''}" />
+          </div>
+          <div>
+            <label class="label">Mois de fin (optionnel)</label>
+            <input id="dep-fin" class="input" type="month" value="${v.mois_fin ? v.mois_fin.annee+'-'+String(v.mois_fin.mois).padStart(2,'0') : ''}" />
+          </div>
+        </div>
+      </div>
+      <div class="flex gap-3 mt-5">
+        <button class="btn-primary flex-1" onclick="saveDepense('${v.id}','${societeId}')">Enregistrer</button>
+        <button class="btn-secondary" onclick="closeDepenseModal()">Annuler</button>
+      </div>
+    </div>
+  </div>`);
+}
+
+function closeDepenseModal() { document.getElementById('dep-modal')?.remove(); }
+
+function _parseMonth(val) {
+  if (!val) return null;
+  const [a, m] = val.split('-');
+  return { annee: parseInt(a), mois: parseInt(m) };
+}
+
+function saveDepense(id, societeId) {
+  const label   = document.getElementById('dep-label').value.trim();
+  const montant = parseFloat(document.getElementById('dep-montant').value);
+  if (!label) return alert('Le libellé est obligatoire.');
+  if (!montant || montant <= 0) return alert('Le montant doit être supérieur à 0.');
+  const debut = _parseMonth(document.getElementById('dep-debut').value);
+  if (!debut) return alert('Le mois de début est obligatoire.');
+
+  const data = {
+    id, societe_id: societeId,
+    label, montant_ht: montant,
+    tva_taux:    parseFloat(document.getElementById('dep-tva-val').value) || 0,
+    categorie:   document.getElementById('dep-cat').value,
+    periodicite: document.getElementById('dep-perio').value,
+    mois_debut:  debut,
+    mois_fin:    _parseMonth(document.getElementById('dep-fin').value),
+    actif: true,
+  };
+
+  if (!STATE.depenses) STATE.depenses = [];
+  const idx = STATE.depenses.findIndex(d => d.id === id);
+  if (idx !== -1) STATE.depenses[idx] = data;
+  else STATE.depenses.push(data);
+
+  saveState();
+  closeDepenseModal();
+  _socTab = 'bilan';
+  renderSocieteDetail(document.getElementById('app'), societeId);
+}
+
+function deleteDepense(id, societeId) {
+  if (!confirm('Supprimer cette dépense ?')) return;
+  STATE.depenses = (STATE.depenses || []).filter(d => d.id !== id);
+  saveState();
   renderSocieteDetail(document.getElementById('app'), societeId);
 }
 
