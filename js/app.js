@@ -16,6 +16,177 @@ let STATE = { ...STATE_DEFAULTS };
 // Persiste STATE dans localStorage après chaque mutation
 function saveState() {
   Storage.save(STATE);
+  autoSaveToFile();
+}
+
+// ─── AUTO-SAVE FILE SYSTEM ACCESS API ────────────────────────────────────────
+
+let _fsHandle = null; // FileSystemFileHandle en mémoire pour la session
+
+// IndexedDB : stocker / récupérer le handle entre sessions
+const _fsDB = (() => {
+  const DB_NAME = 'portfoliopro_fs', STORE = 'handles', KEY = 'autosave';
+  function open() {
+    return new Promise((res, rej) => {
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = e => e.target.result.createObjectStore(STORE);
+      req.onsuccess = e => res(e.target.result);
+      req.onerror   = e => rej(e.target.error);
+    });
+  }
+  return {
+    async save(handle) {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).put(handle, KEY);
+        tx.oncomplete = res; tx.onerror = rej;
+      });
+    },
+    async load() {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const tx = db.transaction(STORE, 'readonly');
+        const req = tx.objectStore(STORE).get(KEY);
+        req.onsuccess = e => res(e.target.result || null);
+        req.onerror   = e => rej(e.target.error);
+      });
+    },
+    async clear() {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).delete(KEY);
+        tx.oncomplete = res; tx.onerror = rej;
+      });
+    },
+  };
+})();
+
+// Écriture silencieuse dans le fichier
+async function autoSaveToFile() {
+  if (!_fsHandle) return;
+  try {
+    const perm = await _fsHandle.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') return; // ne pas demander de permission en arrière-plan
+    const payload = { _exported_at: new Date().toISOString(), _version: 1, ...STATE };
+    const writable = await _fsHandle.createWritable();
+    await writable.write(JSON.stringify(payload, null, 2));
+    await writable.close();
+    _updateAutoSaveIndicator('ok');
+  } catch (e) {
+    console.warn('Auto-save échoué :', e);
+    _updateAutoSaveIndicator('error');
+  }
+}
+
+// Choisir le fichier de sauvegarde (appelé par l'utilisateur)
+async function pickAutoSaveFile() {
+  if (!window.showSaveFilePicker) {
+    alert('Votre navigateur ne supporte pas cette fonctionnalité.\nUtilisez Chrome ou Edge.');
+    return;
+  }
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: 'portfoliopro_autosave.json',
+      types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
+    });
+    _fsHandle = handle;
+    await _fsDB.save(handle);
+    await autoSaveToFile(); // première écriture immédiate
+    _updateAutoSaveIndicator('ok');
+    _refreshAutoSaveSettings();
+  } catch (e) {
+    if (e.name !== 'AbortError') console.error(e);
+  }
+}
+
+// Désactiver l'auto-save
+async function disableAutoSave() {
+  _fsHandle = null;
+  await _fsDB.clear();
+  _updateAutoSaveIndicator('off');
+  _refreshAutoSaveSettings();
+}
+
+// Restaurer le handle depuis IndexedDB au chargement
+async function restoreAutoSaveHandle() {
+  try {
+    const handle = await _fsDB.load();
+    if (!handle) return;
+    // Vérifier si la permission est encore accordée (sans la demander)
+    const perm = await handle.queryPermission({ mode: 'readwrite' });
+    if (perm === 'granted') {
+      _fsHandle = handle;
+      _updateAutoSaveIndicator('ok');
+    } else {
+      // Permission expirée — on garde le handle pour pouvoir re-demander au clic
+      _fsHandle = handle;
+      _updateAutoSaveIndicator('pending');
+    }
+  } catch (e) {
+    console.warn('Impossible de restaurer le handle auto-save :', e);
+  }
+}
+
+// Ré-autoriser si la permission a expiré (appelé au clic utilisateur)
+async function reauthorizeAutoSave() {
+  if (!_fsHandle) return;
+  try {
+    const perm = await _fsHandle.requestPermission({ mode: 'readwrite' });
+    if (perm === 'granted') {
+      await autoSaveToFile();
+      _updateAutoSaveIndicator('ok');
+      _refreshAutoSaveSettings();
+    }
+  } catch (e) { console.error(e); }
+}
+
+// Indicateur dans la navbar
+function _updateAutoSaveIndicator(status) {
+  const el = document.getElementById('autosave-indicator');
+  if (!el) return;
+  const cfg = {
+    ok:      { dot: 'bg-emerald-400', text: 'Auto-save actif', title: 'Sauvegarde automatique active' },
+    pending: { dot: 'bg-amber-400 animate-pulse', text: 'Cliquer pour ré-autoriser', title: 'Permission expirée — cliquer pour réactiver' },
+    error:   { dot: 'bg-red-400', text: 'Erreur auto-save', title: 'Échec de la sauvegarde automatique' },
+    off:     { dot: 'hidden', text: '', title: '' },
+  }[status] || { dot: 'hidden', text: '', title: '' };
+  el.innerHTML = status === 'off' ? '' : `
+    <button onclick="status==='pending'?reauthorizeAutoSave():openSettings()"
+      class="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+      title="${cfg.title}">
+      <span class="w-1.5 h-1.5 rounded-full ${cfg.dot}"></span>
+      <span>${cfg.text}</span>
+    </button>`;
+  // stocker le status pour le bouton pending
+  el.dataset.status = status;
+}
+
+function _refreshAutoSaveSettings() {
+  const el = document.getElementById('autosave-settings-block');
+  if (el) el.innerHTML = _renderAutoSaveBlock();
+}
+
+function _renderAutoSaveBlock() {
+  const supported = !!window.showSaveFilePicker;
+  if (!supported) return `<p class="text-slate-500 text-xs">⚠️ Non supporté sur ce navigateur — utilisez Chrome ou Edge.</p>`;
+  if (_fsHandle) {
+    return `
+      <div class="flex items-center gap-2 p-2 bg-emerald-900/20 border border-emerald-800/40 rounded-lg">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 shrink-0"></span>
+        <div class="flex-1 min-w-0">
+          <p class="text-emerald-300 text-xs font-medium">Auto-save actif</p>
+          <p class="text-slate-500 text-xs truncate">${_fsHandle.name}</p>
+        </div>
+        <button onclick="disableAutoSave()" class="text-xs text-slate-500 hover:text-red-400 transition-colors shrink-0">Désactiver</button>
+      </div>`;
+  }
+  return `
+    <button class="btn-secondary text-sm w-full" onclick="pickAutoSaveFile()">
+      📁 Choisir un fichier de sauvegarde automatique
+    </button>
+    <p class="text-slate-500 text-xs">Choisissez un fichier .json (ex: dans Google Drive) — l'app y écrira automatiquement à chaque modification.</p>`;
 }
 
 // ─── ROUTER ──────────────────────────────────────────────────────────────────
@@ -23,7 +194,7 @@ function saveState() {
 function navigate(hash) { location.hash = hash; }
 
 window.addEventListener('hashchange', render);
-window.addEventListener('load', render);
+window.addEventListener('load', () => { render(); restoreAutoSaveHandle(); });
 
 // ─── RENDER ──────────────────────────────────────────────────────────────────
 
@@ -104,6 +275,7 @@ function navBar(activeRoute) {
       <span class="text-white font-bold mr-4 text-sm">Portfolio Pro</span>
       ${items}
       <div class="ml-auto flex gap-2">
+        <span id="autosave-indicator"></span>
         <button onclick="openSettings()" class="btn-secondary text-xs px-2 py-1">⚙ Paramètres</button>
       </div>
     </div>
@@ -125,6 +297,11 @@ function openSettings() {
         <div class="flex flex-col gap-2">
           <button class="btn-secondary text-sm" onclick="exportData()">⬇ Exporter backup JSON</button>
           <button class="btn-secondary text-sm" onclick="importData()">⬆ Importer backup JSON</button>
+        </div>
+        <hr class="border-slate-700" />
+        <div>
+          <p class="text-slate-400 text-xs font-medium mb-2">💾 Sauvegarde automatique</p>
+          <div id="autosave-settings-block" class="flex flex-col gap-2">${_renderAutoSaveBlock()}</div>
         </div>
         <hr class="border-slate-700" />
         <button class="btn-danger text-sm w-full" onclick="resetData()">🗑 Réinitialiser toutes les données</button>
