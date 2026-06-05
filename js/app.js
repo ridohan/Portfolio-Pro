@@ -1623,6 +1623,12 @@ function renderFiscalResultats(soc) {
           </div>`;
         }).join('')}
       </div>
+      <div class="mt-4 flex justify-end">
+        <button onclick="openIRFromBilan('${soc.id}', ${assiette})"
+          class="btn-secondary text-xs px-3 py-1.5 flex items-center gap-1.5">
+          📊 Voir le détail du calcul IR
+        </button>
+      </div>
       ${deltaHtml}
     </div>`;
   };
@@ -1706,6 +1712,31 @@ function renderSimuFiscale(soc) {
     <!-- Résultats -->
     <div id="fi-resultats">${renderFiscalResultats(soc)}</div>
   </div>`;
+}
+
+function openIRFromBilan(societeId, assiette) {
+  const cfg = getBilanIRConfig(societeId);
+  // Injecter les paramètres dans _irState
+  Object.assign(_irState, {
+    annee:            new Date().getFullYear() - 1,
+    situation:        cfg.situation        || 'celibataire',
+    nbEnfants:        cfg.nbEnfants        || 0,
+    salaires_mode:    cfg.salaires_mode    || 'brut',
+    salaires_vous:    cfg.salaires_vous    || 0,
+    salaires_conjoint:cfg.salaires_conjoint|| 0,
+    bic_bnc:          Math.round(assiette),
+    foncier:          cfg.foncier          || 0,
+    micro_foncier:    cfg.micro_foncier    || 0,
+    per:              cfg.per              || 0,
+    pas_vous:         cfg.pas_vous         || 0,
+    pas_conjoint:     cfg.pas_conjoint     || 0,
+    // Réinitialiser les champs non configurés dans le bilan
+    dividendes_bareme: 0, dividendes_pfu: 0, pv_bareme: 0, pv_pfu: 0, autres: 0,
+    dons: 0, scol_college: 0, scol_lycee: 0, scol_superieur: 0,
+    garde_enfants: 0, emploi_domicile: 0, formation: 0, autres_credits: 0,
+  });
+  _currentSimId = null; // nouvelle simulation non sauvegardée
+  navigate('#ir');
 }
 
 // ─── DÉPENSES — CRUD ─────────────────────────────────────────────────────────
