@@ -1,11 +1,19 @@
 // ─── STATE ───────────────────────────────────────────────────────────────────
 
-let STATE = {
+const STATE_DEFAULTS = {
   societes: [],
+  missions: [],
+  cra_entries: [],
   simulations_ir: [],
   exercices_fiscaux: [],
-  ui_prefs: [],
 };
+
+let STATE = { ...STATE_DEFAULTS };
+
+// Persiste STATE dans localStorage après chaque mutation
+function saveState() {
+  Storage.save(STATE);
+}
 
 // ─── ROUTER ──────────────────────────────────────────────────────────────────
 
@@ -14,67 +22,24 @@ function navigate(hash) { location.hash = hash; }
 window.addEventListener('hashchange', render);
 window.addEventListener('load', render);
 
-// ─── PRÉFÉRENCES UI ──────────────────────────────────────────────────────────
-
-function getUiPref(key, defaultVal = null) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw !== null) return JSON.parse(raw);
-  } catch {}
-  if (Array.isArray(STATE.ui_prefs)) {
-    const pref = STATE.ui_prefs.find(p => p.key === key);
-    if (pref?.value !== undefined && pref.value !== '') {
-      try { return JSON.parse(pref.value); } catch { return pref.value; }
-    }
-  }
-  return defaultVal;
-}
-
-function persistUiPref(key, value) {
-  const serialized = JSON.stringify(value);
-  try { localStorage.setItem(key, serialized); } catch {}
-  if (!Array.isArray(STATE.ui_prefs)) STATE.ui_prefs = [];
-  const idx = STATE.ui_prefs.findIndex(p => p.key === key);
-  if (idx !== -1) STATE.ui_prefs[idx].value = serialized;
-  else STATE.ui_prefs.push({ key, value: serialized });
-  API.saveUiPref(key, serialized).catch(() => {});
-}
-
 // ─── RENDER ──────────────────────────────────────────────────────────────────
 
-async function render() {
+function render() {
   const app = document.getElementById('app');
-  if (!API.isConfigured()) return renderSetup(app);
 
-  const isDemo = API.url === 'demo';
-  const cached = API._getCache();
-  if (cached) {
-    STATE = cached;
-  } else if (isDemo) {
-    // Mode démo : STATE vide, pas de fetch
-  } else {
-    app.innerHTML = `<div class="flex items-center justify-center h-64 text-slate-400">Chargement…</div>`;
-    try {
-      STATE = await API.getData();
-    } catch (e) {
-      app.innerHTML = errorBanner(e.message); return;
-    }
-    if (Array.isArray(STATE.ui_prefs)) {
-      STATE.ui_prefs.forEach(p => {
-        if (p.key && p.value !== undefined && p.value !== '') {
-          try { localStorage.setItem(p.key, p.value); } catch {}
-        }
-      });
-    }
+  // Charger depuis localStorage au premier appel
+  const saved = Storage.load();
+  if (saved) {
+    STATE = { ...STATE_DEFAULTS, ...saved };
   }
 
   const hash = location.hash || '#dashboard';
   const [route, id] = hash.slice(1).split('/');
 
-  if      (route === 'dashboard')  renderDashboard(app);
-  else if (route === 'ir')         renderSimulateurIR(app, id);
-  else if (route === 'societes' && !id) renderSocietes(app);
-  else if (route === 'societes' &&  id) renderSocieteDetail(app, id);
+  if      (route === 'dashboard')        renderDashboard(app);
+  else if (route === 'ir')               renderSimulateurIR(app, id);
+  else if (route === 'societes' && !id)  renderSocietes(app);
+  else if (route === 'societes' &&  id)  renderSocieteDetail(app, id);
   else renderDashboard(app);
 }
 
@@ -136,75 +101,24 @@ function navBar(activeRoute) {
 
 // ─── SETUP ───────────────────────────────────────────────────────────────────
 
-function renderSetup(app) {
-  app.innerHTML = `
-  <div class="min-h-screen flex items-center justify-center p-6">
-    <div class="modal-box max-w-md w-full">
-      <h2 class="text-lg font-bold text-white mb-1">Configuration initiale</h2>
-      <p class="text-slate-400 text-sm mb-4">Connectez votre Google Sheet via AppScript.</p>
-      <div class="space-y-3">
-        <div>
-          <label class="label">URL AppScript Web App</label>
-          <input id="cfg-url" class="input" placeholder="https://script.google.com/macros/s/…/exec" />
-        </div>
-        <div>
-          <label class="label">Token secret</label>
-          <input id="cfg-token" class="input" type="password" placeholder="votre token" />
-        </div>
-      </div>
-      <div class="flex gap-3 mt-5">
-        <button class="btn-primary flex-1" onclick="saveSetup()">Enregistrer et continuer</button>
-        <button class="btn-secondary" onclick="skipSetup()">Mode démo</button>
-      </div>
-    </div>
-  </div>`;
-}
-
-function saveSetup() {
-  const url   = document.getElementById('cfg-url').value.trim();
-  const token = document.getElementById('cfg-token').value.trim();
-  if (!url || !token) return alert('Veuillez remplir les deux champs.');
-  API.save(url, token);
-  render();
-}
-
-function skipSetup() {
-  localStorage.setItem('pro_appscript_url',   'demo');
-  localStorage.setItem('pro_appscript_token', 'demo');
-  render();
-}
-
 function openSettings() {
-  const ttl = API.getCacheTTLMinutes();
-  const age = API.cacheAge();
-  const ageStr = age != null ? `Cache âgé de ${age}s` : 'Pas de cache';
-
+  const size = Storage.sizeKB();
   document.body.insertAdjacentHTML('beforeend', `
   <div id="settings-modal" class="modal-backdrop" onclick="if(event.target===this)closeSettings()">
     <div class="modal-box">
       <h3 class="text-base font-semibold text-white mb-4">Paramètres</h3>
-      <div class="space-y-4">
-        <div>
-          <label class="label">TTL cache (minutes)</label>
-          <input id="s-ttl" class="input" type="number" min="1" value="${ttl}" />
-        </div>
-        <p class="text-slate-500 text-xs">${ageStr}</p>
+      <div class="space-y-3">
+        <p class="text-slate-400 text-sm">Données stockées localement dans votre navigateur.</p>
+        <p class="text-slate-500 text-xs">Taille actuelle : <span class="text-slate-300">${size} Ko</span></p>
+        <hr class="border-slate-700" />
         <div class="flex flex-col gap-2">
-          <button class="btn-secondary text-sm" onclick="forceRefresh()">Forcer rechargement</button>
-          <button class="btn-secondary text-sm" onclick="exportCache()">Exporter cache JSON</button>
+          <button class="btn-secondary text-sm" onclick="exportData()">⬇ Exporter backup JSON</button>
+          <button class="btn-secondary text-sm" onclick="importData()">⬆ Importer backup JSON</button>
         </div>
-        <hr class="border-slate-600" />
-        <div>
-          <label class="label">URL AppScript</label>
-          <input id="s-url" class="input" value="${API.url || ''}" />
-        </div>
-        <div>
-          <label class="label">Token</label>
-          <input id="s-token" class="input" type="password" value="${API.token || ''}" />
-        </div>
+        <hr class="border-slate-700" />
+        <button class="btn-danger text-sm w-full" onclick="resetData()">🗑 Réinitialiser toutes les données</button>
       </div>
-      <div class="flex gap-3 mt-5">
-        <button class="btn-primary flex-1" onclick="saveSettings()">Enregistrer</button>
+      <div class="flex justify-end mt-5">
         <button class="btn-secondary" onclick="closeSettings()">Fermer</button>
       </div>
     </div>
@@ -213,29 +127,26 @@ function openSettings() {
 
 function closeSettings() { document.getElementById('settings-modal')?.remove(); }
 
-function saveSettings() {
-  const url   = document.getElementById('s-url').value.trim();
-  const token = document.getElementById('s-token').value.trim();
-  const ttl   = document.getElementById('s-ttl').value;
-  if (url && token) API.save(url, token);
-  if (ttl) API.setCacheTTL(ttl);
-  closeSettings();
+function exportData() {
+  Storage.exportJSON(STATE);
 }
 
-async function forceRefresh() {
-  closeSettings();
-  API.clearCache();
-  await render();
+function importData() {
+  Storage.importJSON((data) => {
+    if (!confirm('Remplacer toutes les données actuelles par celles du fichier ?')) return;
+    STATE = { ...STATE_DEFAULTS, ...data };
+    saveState();
+    closeSettings();
+    render();
+  });
 }
 
-function exportCache() {
-  const raw = localStorage.getItem('portfoliopro_cache');
-  if (!raw) return alert('Pas de cache à exporter.');
-  const blob = new Blob([raw], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `portfoliopro_cache_${new Date().toISOString().slice(0,10)}.json`;
-  a.click();
+function resetData() {
+  if (!confirm('Supprimer définitivement toutes les données ? Cette action est irréversible.')) return;
+  STATE = { ...STATE_DEFAULTS };
+  saveState();
+  closeSettings();
+  render();
 }
 
 // ─── DASHBOARD ───────────────────────────────────────────────────────────────
@@ -427,7 +338,7 @@ function openSocieteModal(id) {
 
 function closeSocieteModal() { document.getElementById('soc-modal')?.remove(); }
 
-async function saveSociete(id) {
+function saveSociete(id) {
   const data = {
     id,
     nom:            document.getElementById('sm-nom').value.trim(),
@@ -439,21 +350,21 @@ async function saveSociete(id) {
   };
   if (!data.nom) return alert('Le nom est obligatoire.');
 
-  const idx = (STATE.societes || []).findIndex(s => s.id === id);
+  if (!STATE.societes) STATE.societes = [];
+  const idx = STATE.societes.findIndex(s => s.id === id);
   if (idx !== -1) STATE.societes[idx] = data;
-  else { if (!STATE.societes) STATE.societes = []; STATE.societes.push(data); }
+  else STATE.societes.push(data);
 
+  saveState();
   closeSocieteModal();
   renderSocietes(document.getElementById('app'));
-
-  try { await API.saveSociete(data); } catch(e) { console.warn('saveSociete:', e); }
 }
 
-async function deleteSociete(id) {
+function deleteSociete(id) {
   if (!confirm('Supprimer cette société ?')) return;
   STATE.societes = (STATE.societes || []).filter(s => s.id !== id);
+  saveState();
   renderSocietes(document.getElementById('app'));
-  try { await API.deleteSociete(id); } catch(e) { console.warn('deleteSociete:', e); }
 }
 
 // ─── BARÈMES PAR ANNÉE DE REVENUS ────────────────────────────────────────────

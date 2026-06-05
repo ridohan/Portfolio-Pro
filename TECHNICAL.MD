@@ -12,78 +12,42 @@
 ## Vue d'ensemble
 
 ```
-App HTML (GitHub Pages)
+App HTML (fichier local ou GitHub Pages)
     │
-    │  fetch() — requêtes HTTP
+    │  lecture / écriture synchrone
     ▼
-AppScript Web App
-    │
-    │  lecture / écriture
-    ▼
-Google Sheet (BDD)
-    ├── societes
-    ├── simulations_ir        ← historique des simulations IR sauvegardées
-    ├── exercices_fiscaux     ← données fiscales annuelles par société
-    └── ui_prefs
+localStorage (navigateur)
+    └── portfoliopro_data     ← STATE complet sérialisé en JSON
 ```
+
+Pas de serveur, pas de réseau, pas de dépendance externe.
+Les données sont exportables / importables via un fichier JSON horodaté.
 
 ---
 
-## Google Sheet — Structure des onglets
+## Structure de STATE
 
-### `societes`
+Objet unique sérialisé dans `localStorage` sous la clé `portfoliopro_data` :
 
-| Colonne | Type | Description |
-|---|---|---|
-| `id` | string | Identifiant unique (ex : `soc_001`) |
-| `nom` | string | Nom ou raison sociale |
-| `forme` | string | `ei` \| `eurl` \| `sarl` \| `sas` \| `sasu` \| `snc` \| `sci` |
-| `regime_fiscal` | string | `ir` \| `is` |
-| `date_creation` | date | Date de création |
-| `capital` | number | Capital social (en €) |
-| `note` | string | Note libre |
+```js
+STATE = {
+  societes:          [],   // fiches société
+  missions:          [],   // missions par société
+  cra_entries:       [],   // entrées CRA (mission × mois)
+  simulations_ir:    [],   // simulations IR sauvegardées (via localStorage dédié)
+  exercices_fiscaux: [],   // données fiscales annuelles par société
+}
+```
 
-### `simulations_ir`
-
-| Colonne | Type | Description |
-|---|---|---|
-| `id` | string | Identifiant unique |
-| `nom` | string | Libellé de la simulation |
-| `annee` | number | Année fiscale |
-| `situation` | string | `celibataire` \| `marie` \| `divorce` \| `veuf` |
-| `nb_enfants` | number | Nombre d'enfants à charge |
-| `revenus` | json | Tableau de sources de revenus |
-| `options` | json | Options (option barème dividendes, etc.) |
-| `created_at` | datetime | Date de création |
-| `societe_id` | string | Référence vers `societes.id` *(si simulation liée à une société)* |
-
-### `ui_prefs`
-
-| Colonne | Type | Description |
-|---|---|---|
-| `key` | string | Clé de préférence |
-| `value` | string | Valeur JSON sérialisée |
+> Note : les simulations IR sont également stockées séparément sous la clé `portfoliopro_simulations_ir` pour un accès indépendant depuis le simulateur.
 
 ---
 
-## AppScript Web App
+## Backup / Restauration
 
-### Endpoints
-
-**Lecture (GET)**
-```
-GET ?action=getData&token=xxx
-→ retourne : societes, simulations_ir, exercices_fiscaux, ui_prefs
-```
-
-**Écriture (POST)**
-```json
-{ "action": "saveSociete", "data": { ... } }
-{ "action": "deleteSociete", "id": "soc_001" }
-{ "action": "saveSimulationIR", "data": { ... } }
-{ "action": "deleteSimulationIR", "id": "sim_001" }
-{ "action": "saveUiPref", "key": "dashboard_order", "value": "[...]" }
-```
+- **Export** : bouton dans ⚙ Paramètres → génère `portfoliopro_backup_YYYY-MM-DD.json`
+- **Import** : bouton dans ⚙ Paramètres → sélection d'un fichier JSON → remplacement du STATE complet
+- **Réinitialisation** : bouton rouge dans ⚙ Paramètres → remet STATE à zéro
 
 ---
 
@@ -94,10 +58,13 @@ GET ?action=getData&token=xxx
 ```
 index.html          ← point d'entrée unique
 js/
-  api.js            ← couche API (fetch + cache localStorage)
+  storage.js        ← persistance localStorage (load/save/export/import)
   app.js            ← application complète (router + vues + calculs)
 fiscal/
   INSTRUCTIONS.MD   ← documentation du module fiscal
+  SIMULATEUR_IR.md  ← documentation détaillée du simulateur IR
+societe/
+  GENERAL.MD        ← spécifications du module société / CRA
 GENERAL.MD
 TECHNICAL.MD
 ```
@@ -143,7 +110,5 @@ Fonctions pures, aucune dépendance externe :
 
 ## Sécurité
 
-Identique à Portfolio Dev :
-- Token secret dans les Script Properties AppScript
-- URL AppScript + token dans le `localStorage` du navigateur (jamais dans le repo)
-- Écran de configuration au premier lancement
+Les données restent dans le navigateur — elles ne transitent jamais sur un réseau.
+Aucune configuration requise au premier lancement.
