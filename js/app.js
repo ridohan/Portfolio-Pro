@@ -561,11 +561,11 @@ function renderSocMissions(soc) {
 }
 
 function renderSocCRA(soc) {
-  const missions   = getMissionsActives(soc.id);
-  const annee      = _craAnnee;
-  const moisLabels = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
-  const now        = new Date();
-  const moisCourant = now.getMonth() + 1;
+  const missions      = getMissionsActives(soc.id);
+  const annee         = _craAnnee;
+  const moisLabels    = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
+  const now           = new Date();
+  const moisCourant   = now.getMonth() + 1;
   const anneeCourante = now.getFullYear();
 
   if (missions.length === 0) return `
@@ -574,122 +574,142 @@ function renderSocCRA(soc) {
       <button onclick="switchSocTab('missions','${soc.id}')" class="btn-secondary text-sm">Ajouter une mission</button>
     </div>`;
 
+  // helpers cellule
+  const cellLabel = (txt, cls = 'text-slate-400') =>
+    `<div class="text-xs ${cls} leading-5">${txt}</div>`;
+
   // En-têtes mois
   const theadMois = moisLabels.map((label, i) => {
-    const mois = i + 1;
-    const jo   = calcJoursOuvres(annee, mois);
+    const mois  = i + 1;
     const isCur = annee === anneeCourante && mois === moisCourant;
-    return `<th class="text-center font-normal min-w-[90px] px-1 pb-2 ${isCur ? 'text-blue-400' : 'text-slate-400'}">
-      <div class="text-xs font-medium">${label} ${annee}</div>
-      <div class="text-slate-500 text-xs">${jo} j ouv.</div>
+    return `<th class="text-center font-normal min-w-[110px] px-1 py-2 border-l border-slate-700 ${isCur ? 'bg-blue-900/20' : ''}">
+      <span class="text-xs font-semibold ${isCur ? 'text-blue-300' : 'text-slate-300'}">${label} ${annee}</span>
     </th>`;
   }).join('');
 
   // Lignes missions
   const tbodyRows = missions.map(m => {
     const totaux = calcCRATotauxMission(m, annee);
-    const cells  = moisLabels.map((_, i) => {
+    const tvaDue = m.tva ? totaux.caTTC - totaux.caHT : 0;
+
+    const cells = moisLabels.map((_, i) => {
       const mois  = i + 1;
       const hors  = isMoisHorsMission(m, annee, mois);
       const isCur = annee === anneeCourante && mois === moisCourant;
-      if (hors) return `<td class="px-1 py-1"><div class="bg-slate-900/50 rounded h-16 opacity-30"></div></td>`;
+      const jo    = calcJoursOuvres(annee, mois);
+
+      if (hors) return `<td class="border-l border-slate-700 px-2 py-1 ${isCur ? 'bg-blue-900/10' : 'bg-slate-900/30'}">
+        <div class="h-full opacity-20 text-center text-slate-500 text-xs pt-4">—</div>
+      </td>`;
 
       const entry = getCRAEntry(m.id, annee, mois);
       const c     = calcCRACell(m, annee, mois);
-      const overrideBadge = c.joursOverride != null
-        ? `<span class="text-blue-400 text-xs cursor-pointer" title="Jours surchargés" onclick="overrideCRADispo('${m.id}',${annee},${mois},'${soc.id}')">✏ ${c.joursOverride}j</span>`
-        : `<span class="text-slate-600 text-xs cursor-pointer hover:text-slate-400" onclick="overrideCRADispo('${m.id}',${annee},${mois},'${soc.id}')">✏</span>`;
-
       const hasAbsence = (entry.jours_absence || 0) > 0;
-      const bg = isCur ? 'bg-blue-900/10 border border-blue-800/30' : hasAbsence ? 'bg-amber-900/10' : 'bg-slate-800';
+      const bg = isCur ? 'bg-blue-900/10' : hasAbsence ? 'bg-amber-900/10' : '';
 
-      return `<td class="px-1 py-1">
-        <div class="${bg} rounded p-2 text-center">
-          <div class="flex items-center justify-center gap-1 mb-1">
-            <input type="number" min="0" max="${c.jousDispo}"
-              class="w-10 text-center bg-slate-700 border border-slate-600 rounded text-xs text-white py-0.5 focus:border-blue-500 outline-none"
-              value="${entry.jours_absence || ''}" placeholder="0"
-              onchange="saveCRAEntry('${m.id}',${annee},${mois},'jours_absence',parseFloat(this.value)||0,'${soc.id}')"
-              title="Jours d'absence" />
-            <span class="text-slate-500 text-xs">abs</span>
-          </div>
-          <div class="text-white text-xs font-medium">${c.jFact} j</div>
-          <div class="text-slate-300 text-xs">${fmtE(c.caHT)}</div>
-          ${m.tva ? `<div class="text-slate-500 text-xs">${fmtE(c.caTTC)} TTC</div>` : ''}
-          <div class="mt-1">${overrideBadge}</div>
+      const overrideLabel = c.joursOverride != null
+        ? `<span class="text-blue-400 cursor-pointer" onclick="overrideCRADispo('${m.id}',${annee},${mois},'${soc.id}')" title="Surcharge active — cliquer pour modifier">✏ ${c.joursOverride} j</span>`
+        : `<span class="text-slate-600 cursor-pointer hover:text-slate-400" onclick="overrideCRADispo('${m.id}',${annee},${mois},'${soc.id}')" title="Modifier jours disponibles">✏ ${jo} j</span>`;
+
+      return `<td class="border-l border-slate-700 px-2 py-1.5 ${bg} text-right">
+        <div class="text-xs text-slate-500 leading-5">${overrideLabel}</div>
+        <div class="flex items-center justify-end gap-1 leading-5">
+          <input type="number" min="0" max="${c.jousDispo}"
+            class="w-9 text-center bg-slate-700 border border-slate-600 rounded text-xs text-amber-300 py-0 focus:border-blue-500 outline-none"
+            value="${entry.jours_absence || ''}" placeholder="0"
+            onchange="saveCRAEntry('${m.id}',${annee},${mois},'jours_absence',parseFloat(this.value)||0,'${soc.id}')" />
+          <span class="text-slate-500 text-xs">abs</span>
         </div>
+        <div class="text-xs font-semibold text-white leading-5">${c.jFact} j trav.</div>
+        <div class="text-xs text-slate-300 leading-5">${fmtE(c.caHT)} HT</div>
+        ${m.tva ? `<div class="text-xs text-slate-400 leading-5">${fmtE(c.caTTC)} TTC</div>` : ''}
       </td>`;
     }).join('');
 
-    return `<tr class="border-b border-slate-700/30">
-      <td class="pr-3 py-2 min-w-[160px]">
-        <div class="font-medium text-white text-sm">${m.client}</div>
-        <div class="text-slate-500 text-xs">${fmtE(m.tjm)}/j ${!m.tva ? '· sans TVA' : ''}</div>
+    return `<tr class="border-b border-slate-700/50">
+      <td class="px-3 py-2 align-top min-w-[160px]">
+        <div class="font-semibold text-white text-sm">${m.client}</div>
+        <div class="text-slate-500 text-xs">${fmtE(m.tjm)}/j${!m.tva ? ' · sans TVA' : ''}</div>
+        <div class="mt-2 text-xs text-slate-400 leading-5">${totaux.jours} j</div>
+        <div class="text-xs text-green-400 leading-5 font-medium">${fmtE(totaux.caHT)} HT</div>
+        ${m.tva ? `<div class="text-xs text-slate-400 leading-5">${fmtE(tvaDue)} TVA</div>
+        <div class="text-xs text-slate-300 leading-5">${fmtE(totaux.caTTC)} TTC</div>` : ''}
       </td>
       ${cells}
-      <td class="pl-2 py-2 text-right min-w-[90px]">
-        <div class="text-white text-sm font-semibold">${fmtE(totaux.caHT)}</div>
-        ${m.tva ? `<div class="text-slate-400 text-xs">${fmtE(totaux.caTTC)} TTC</div>` : ''}
-        <div class="text-slate-500 text-xs">${totaux.jours} j</div>
+      <td class="border-l border-slate-700 px-3 py-2 align-top text-right min-w-[110px]">
+        <div class="text-xs text-slate-400 leading-5">${totaux.jours} j</div>
+        <div class="text-xs font-bold text-green-400 leading-5">${fmtE(totaux.caHT)} HT</div>
+        ${m.tva ? `<div class="text-xs text-slate-400 leading-5">${fmtE(tvaDue)} TVA</div>
+        <div class="text-xs text-slate-300 leading-5">${fmtE(totaux.caTTC)} TTC</div>` : ''}
       </td>
     </tr>`;
   }).join('');
 
-  // Ligne totaux
-  const totauxMoisHtml = moisLabels.map((_, i) => {
-    const mois = i + 1;
-    const t    = calcCRATotauxMois(soc.id, annee, mois);
-    const isCur = annee === anneeCourante && mois === moisCourant;
-    return `<td class="px-1 py-2 text-center ${isCur ? 'text-blue-300' : ''}">
-      <div class="text-white text-xs font-semibold">${fmtE(t.caHT)}</div>
-      <div class="text-slate-400 text-xs">${t.jours} j</div>
-    </td>`;
-  }).join('');
-
+  // Ligne totaux mensuelle
   const totauxAnnee = missions.reduce((acc, m) => {
     const t = calcCRATotauxMission(m, annee);
     acc.caHT += t.caHT; acc.caTTC += t.caTTC; acc.jours += t.jours;
     return acc;
   }, { caHT: 0, caTTC: 0, jours: 0 });
+  const tvaTotaleAnnee = totauxAnnee.caTTC - totauxAnnee.caHT;
+
+  const totauxMoisHtml = moisLabels.map((_, i) => {
+    const mois  = i + 1;
+    const isCur = annee === anneeCourante && mois === moisCourant;
+    // Recalculer avec TVA correcte par mission
+    let caHT = 0, caTTC = 0, jours = 0;
+    missions.forEach(m => {
+      if (isMoisHorsMission(m, annee, mois)) return;
+      const c = calcCRACell(m, annee, mois);
+      caHT += c.caHT; caTTC += c.caTTC; jours += c.jFact;
+    });
+    const tva = caTTC - caHT;
+    return `<td class="border-l border-slate-700 px-2 py-2 text-right ${isCur ? 'bg-blue-900/10' : 'bg-slate-800'}">
+      <div class="text-xs text-slate-400 leading-5">${jours} j</div>
+      <div class="text-xs font-bold text-green-400 leading-5">${fmtE(caHT)} HT</div>
+      ${tva > 0 ? `<div class="text-xs text-slate-400 leading-5">${fmtE(tva)} TVA</div>` : ''}
+      ${caTTC !== caHT ? `<div class="text-xs text-slate-300 leading-5">${fmtE(caTTC)} TTC</div>` : ''}
+    </td>`;
+  }).join('');
 
   return `
   <div class="flex items-center justify-between mb-4">
     <div class="flex items-center gap-3">
-      <button onclick="setCRAYear(-1,'${soc.id}')" class="btn-secondary text-sm px-2 py-1">←</button>
-      <span class="text-white font-semibold text-lg">${annee}</span>
-      <button onclick="setCRAYear(1,'${soc.id}')" class="btn-secondary text-sm px-2 py-1">→</button>
+      <button onclick="setCRAYear(-1,'${soc.id}')" class="btn-secondary text-sm px-3 py-1">←</button>
+      <span class="text-white font-bold text-xl">${annee}</span>
+      <button onclick="setCRAYear(1,'${soc.id}')" class="btn-secondary text-sm px-3 py-1">→</button>
     </div>
     <div class="text-right">
-      <span class="text-slate-400 text-sm">Total annuel : </span>
-      <span class="text-white font-bold">${fmtE(totauxAnnee.caHT)} HT</span>
-      <span class="text-slate-400 text-sm ml-1">(${totauxAnnee.jours} j)</span>
+      <div class="text-slate-400 text-xs">CA annuel prévisionnel</div>
+      <div class="text-green-400 font-bold text-lg">${fmtE(totauxAnnee.caHT)} HT</div>
+      ${tvaTotaleAnnee > 0 ? `<div class="text-slate-400 text-xs">${fmtE(tvaTotaleAnnee)} TVA · ${fmtE(totauxAnnee.caTTC)} TTC</div>` : ''}
     </div>
   </div>
   <div class="overflow-x-auto rounded-xl border border-slate-700">
-    <table class="w-full text-sm" style="min-width:1100px">
-      <thead class="border-b border-slate-700 bg-slate-800/80">
+    <table class="w-full text-sm border-collapse" style="min-width:1300px">
+      <thead class="border-b-2 border-slate-600 bg-slate-800">
         <tr>
-          <th class="text-left text-slate-400 font-normal pb-2 pt-3 px-3">Mission</th>
+          <th class="text-left text-slate-400 font-medium text-xs py-2 px-3 min-w-[160px]">Mission</th>
           ${theadMois}
-          <th class="text-right text-slate-400 font-normal pb-2 pt-3 px-2">Total</th>
+          <th class="text-right text-slate-400 font-medium text-xs py-2 px-3 border-l border-slate-700 min-w-[110px]">Total</th>
         </tr>
       </thead>
-      <tbody class="bg-slate-800/40">
+      <tbody>
         ${tbodyRows}
-        <tr class="border-t-2 border-slate-600 bg-slate-800">
-          <td class="px-3 py-2 text-slate-300 font-semibold text-sm">Total HT / mois</td>
+        <tr class="border-t-2 border-slate-500 bg-slate-800/80">
+          <td class="px-3 py-2 text-xs font-bold text-slate-300">TOTAUX</td>
           ${totauxMoisHtml}
-          <td class="px-2 py-2 text-right">
-            <div class="text-blue-300 font-bold text-sm">${fmtE(totauxAnnee.caHT)}</div>
-            <div class="text-slate-400 text-xs">${totauxAnnee.jours} j</div>
+          <td class="border-l border-slate-700 px-3 py-2 text-right">
+            <div class="text-xs text-slate-400 leading-5">${totauxAnnee.jours} j</div>
+            <div class="text-xs font-bold text-green-400 leading-5">${fmtE(totauxAnnee.caHT)} HT</div>
+            ${tvaTotaleAnnee > 0 ? `<div class="text-xs text-slate-400 leading-5">${fmtE(tvaTotaleAnnee)} TVA</div>
+            <div class="text-xs text-slate-300 leading-5">${fmtE(totauxAnnee.caTTC)} TTC</div>` : ''}
           </td>
         </tr>
       </tbody>
     </table>
   </div>
-  <p class="text-slate-600 text-xs mt-2">
-    Cellule bleue = mois courant · Cellule ambrée = absence saisie · ✏ = surcharge jours disponibles
-  </p>`;
+  <p class="text-slate-600 text-xs mt-2">Mois courant en bleu · absences en orange · ✏ = modifier jours disponibles</p>`;
 }
 
 // ─── MISSIONS — CRUD ─────────────────────────────────────────────────────────
