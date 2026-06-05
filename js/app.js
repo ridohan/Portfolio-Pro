@@ -488,10 +488,11 @@ const BAREMES = {
       { min: 84577,  max: 181917,  taux: 0.41 },
       { min: 181917, max: Infinity, taux: 0.45 },
     ],
-    plafond_demi_part:  1791,
-    abatt_sal_min:      495,
-    abatt_sal_max:      14171,
-    // Bases décote revalorísées ~+0,9% vs 2024 (confirmé par recalcul sur simulateur officiel)
+    // Plafond avantage QF : 1 807€/demi-part (source service-public.fr 2025)
+    plafond_demi_part:  1807,
+    // Abattement 10% salaires : min 504€, max 14 555€ (confirmé sur simulateur officiel)
+    abatt_sal_min:      504,
+    abatt_sal_max:      14555,
     decote_cel_seuil:   1982,  decote_cel_base:  897,
     decote_cpl_seuil:   3275,  decote_cpl_base:  1483,
     decote_taux:        0.4525,
