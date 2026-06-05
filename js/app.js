@@ -6,6 +6,7 @@ const STATE_DEFAULTS = {
   cra_entries: [],
   depenses: [],
   paiements: [],
+  fiscal_configs: [],
   simulations_ir: [],
   exercices_fiscaux: [],
 };
@@ -1352,11 +1353,308 @@ function renderSocBilan(soc) {
         ${resultatRow}
       </tbody>
     </table>
-  </div>`;
+  </div>
+  ${renderSimuFiscale(soc)}`;
 }
 
 function _perioLabel(p) {
   return { mensuelle: '/mois', trimestrielle: '/trim.', semestrielle: '/sem.', annuelle: '/an', ponctuelle: '1×' }[p] || '';
+}
+
+// ─── SIMULATION FISCALE SASU IR ──────────────────────────────────────────────
+
+const SCENARIOS_CSG = [
+  { id: 's0',   label: '0 % — Exonération',      taux: 0,     deductible: 0,     note: 'Cas rarissime (exonération explicite)' },
+  { id: 's97',  label: '9,7 % — Taux activité',  taux: 0.097, deductible: 0.068, note: '6,8 % CSG déductible + 2,9 % CRDS/CSG non ded.' },
+  { id: 's172', label: '17,2 % — Revenus capital', taux: 0.172, deductible: 0,   note: 'Taux PFU — aucune déduction de la base IR' },
+];
+
+function getBilanIRConfig(societeId) {
+  const c = (STATE.fiscal_configs || []).find(x => x.societe_id === societeId);
+  return c || {
+    situation: 'celibataire', nbEnfants: 0, salaires_mode: 'brut',
+    salaires_vous: 0, salaires_conjoint: 0,
+    foncier: 0, micro_foncier: 0, per: 0,
+    pas_vous: 0, pas_conjoint: 0,
+  };
+}
+
+function saveBilanIRConfig(societeId) {
+  const sit = document.getElementById('fi-sit')?.value || 'celibataire';
+  const isMarie = sit === 'marie' || sit === 'pacse';
+  // Afficher/masquer champ conjoint
+  const wrapC = document.getElementById('fi-sal-c-wrap');
+  if (wrapC) wrapC.style.display = isMarie ? '' : 'none';
+  const cfg = {
+    societe_id:   societeId,
+    situation:    sit,
+    nbEnfants:    parseInt(document.getElementById('fi-enf')?.value)   || 0,
+    salaires_mode: document.getElementById('fi-mode')?.value || 'brut',
+    salaires_vous: parseFloat(document.getElementById('fi-sal-v')?.value) || 0,
+    salaires_conjoint: isMarie ? (parseFloat(document.getElementById('fi-sal-c')?.value) || 0) : 0,
+    foncier:      parseFloat(document.getElementById('fi-fonc')?.value)  || 0,
+    micro_foncier: parseFloat(document.getElementById('fi-mfonc')?.value) || 0,
+    per:          parseFloat(document.getElementById('fi-per')?.value)   || 0,
+    pas_vous:     parseFloat(document.getElementById('fi-pas')?.value)   || 0,
+    pas_conjoint: 0,
+  };
+  if (!STATE.fiscal_configs) STATE.fiscal_configs = [];
+  const idx = STATE.fiscal_configs.findIndex(x => x.societe_id === societeId);
+  if (idx !== -1) STATE.fiscal_configs[idx] = cfg; else STATE.fiscal_configs.push(cfg);
+  saveState();
+  // Re-render la section résultats uniquement
+  const div = document.getElementById('fi-resultats');
+  if (div) {
+    const soc = (STATE.societes || []).find(s => s.id === societeId);
+    if (soc) div.innerHTML = renderFiscalResultats(soc);
+  }
+}
+
+function _buildIRParams(cfg, bnc) {
+  return {
+    annee: new Date().getFullYear() - 1,
+    situation: cfg.situation || 'celibataire',
+    nbEnfants: cfg.nbEnfants || 0,
+    salaires_mode: cfg.salaires_mode || 'brut',
+    salaires_vous: cfg.salaires_vous || 0,
+    salaires_conjoint: cfg.salaires_conjoint || 0,
+    bic_bnc: bnc,
+    foncier: cfg.foncier || 0, micro_foncier: cfg.micro_foncier || 0,
+    dividendes_bareme: 0, dividendes_pfu: 0, pv_bareme: 0, pv_pfu: 0, autres: 0,
+    per: cfg.per || 0,
+    dons: 0, scol_college: 0, scol_lycee: 0, scol_superieur: 0,
+    garde_enfants: 0, emploi_domicile: 0, formation: 0, autres_credits: 0,
+    pas_vous: cfg.pas_vous || 0, pas_conjoint: cfg.pas_conjoint || 0,
+    pas_preleve: (cfg.pas_vous || 0) + (cfg.pas_conjoint || 0),
+  };
+}
+
+function calcScenariosIR(assiette, cfg) {
+  return SCENARIOS_CSG.map(s => {
+    const csgMontant = Math.round(assiette * s.taux);
+    const csgDed     = Math.round(assiette * s.deductible);
+    const bncNet     = Math.max(0, assiette - csgDed);
+    const ir         = calcIR(_buildIRParams(cfg, bncNet));
+    // PS foncier déjà dans ir.impotFinal ; on l'isole pour clarté
+    const irSurBNC   = ir.impotFinal - ir.totalPS; // IR pur (hors PS foncier)
+    const totalTaxes = csgMontant + ir.impotFinal;
+    const netImpot   = assiette - totalTaxes;
+    const tauxEff    = assiette > 0 ? (totalTaxes / assiette * 100).toFixed(1) : '—';
+    return { ...s, csgMontant, csgDed, bncNet, ir, irSurBNC, totalTaxes, netImpot, tauxEff };
+  });
+}
+
+function renderFiscalResultats(soc) {
+  const cfg             = getBilanIRConfig(soc.id);
+  const assietteCour    = Math.max(0, calcAssietteCourante(soc.id) - calcDepensesAnnee(soc.id, _bilanAnnee).totalHT);
+  const assietteFin     = Math.max(0, calcEncaissementsAnnee(soc.id, _bilanAnnee).caHT - calcDepensesAnnee(soc.id, _bilanAnnee).totalHT);
+
+  const renderBloc = (assiette, titreAssiette) => {
+    if (assiette <= 0) return `
+    <div class="mb-6">
+      <h4 class="text-xs text-slate-500 uppercase tracking-wide mb-2">${titreAssiette}</h4>
+      <p class="text-slate-600 text-sm">Assiette nulle ou négative — pas de simulation.</p>
+    </div>`;
+
+    const scenarios = calcScenariosIR(assiette, cfg);
+
+    return `
+    <div class="mb-8">
+      <div class="flex items-baseline gap-3 mb-4">
+        <h4 class="text-xs text-slate-400 uppercase tracking-wide">${titreAssiette}</h4>
+        <span class="text-white font-bold text-lg">${fmtE(assiette)}</span>
+      </div>
+      <div class="grid grid-cols-3 gap-4">
+        ${scenarios.map((s, i) => {
+          const highlight = i === 1;
+          const pas = (cfg.pas_vous || 0) + (cfg.pas_conjoint || 0);
+          // IR à prévoir = solde à régler lors de la déclaration (peut être négatif = remboursement)
+          const irAPayer    = s.ir.resteAPayer;
+          // Total encore à décaisser = IR solde + CSG/CRDS (les acomptes PAS sont déjà sortis)
+          const totalAProvisionner = s.csgMontant + Math.max(0, irAPayer);
+          // Taux de prélèvement réel = tout ce qui sort / assiette (y compris PAS déjà versé)
+          const tauxPrelevement = assiette > 0 ? (s.totalTaxes / assiette * 100).toFixed(1) : '—';
+          // Part nette conservée
+          const pctNet = assiette > 0 ? (s.netImpot / assiette * 100).toFixed(1) : '—';
+
+          return `
+          <div class="rounded-xl border p-4 ${highlight ? 'border-blue-600/60 bg-blue-950/20' : 'border-slate-700 bg-slate-800/60'}">
+            <div class="font-semibold text-sm mb-0.5 ${highlight ? 'text-blue-300' : 'text-white'}">${s.label}</div>
+            <div class="text-slate-600 text-xs mb-4">${s.note}</div>
+
+            <!-- Décomposition -->
+            <div class="space-y-1.5 text-xs">
+
+              <!-- CSG/CRDS SASU -->
+              <div class="flex justify-between">
+                <span class="text-slate-500">CSG / CRDS (SASU)</span>
+                <span class="${s.csgMontant > 0 ? 'text-red-400' : 'text-slate-600'}">${s.csgMontant > 0 ? '− ' + fmtE(s.csgMontant) : '—'}</span>
+              </div>
+              ${s.csgDed > 0 ? `<div class="flex justify-between pl-3">
+                <span class="text-slate-600">dont déduit de la base IR</span>
+                <span class="text-slate-500">(${fmtE(s.csgDed)})</span>
+              </div>` : ''}
+
+              <!-- Base IR -->
+              <div class="flex justify-between border-t border-slate-700/60 pt-1.5 mt-1">
+                <span class="text-slate-500">BNC déclaré (après déduction)</span>
+                <span class="text-slate-300">${fmtE(s.bncNet)}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-500">Revenu net global du foyer</span>
+                <span class="text-slate-300">${fmtE(s.ir.revenuImposable)}</span>
+              </div>
+
+              <!-- IR brut → net -->
+              <div class="flex justify-between border-t border-slate-700/60 pt-1.5 mt-1">
+                <span class="text-slate-500">IR brut (barème progressif)</span>
+                <span class="text-slate-300">${fmtE(s.ir.impotBrut)}</span>
+              </div>
+              ${s.ir.decote > 0 ? `<div class="flex justify-between pl-3">
+                <span class="text-slate-600">Décote</span>
+                <span class="text-emerald-700">− ${fmtE(s.ir.decote)}</span>
+              </div>` : ''}
+              ${s.ir.totalReductions + s.ir.totalCredits > 0 ? `<div class="flex justify-between pl-3">
+                <span class="text-slate-600">Réductions & crédits</span>
+                <span class="text-emerald-700">− ${fmtE(s.ir.totalReductions + s.ir.totalCredits)}</span>
+              </div>` : ''}
+              ${s.ir.totalPS > 0 ? `<div class="flex justify-between">
+                <span class="text-slate-500">CSG/PS sur revenus fonciers</span>
+                <span class="text-red-400">− ${fmtE(s.ir.totalPS)}</span>
+              </div>` : ''}
+
+              <!-- PAS déjà versé -->
+              ${pas > 0 ? `<div class="flex justify-between border-t border-slate-700/60 pt-1.5 mt-1">
+                <span class="text-slate-500">PAS & acomptes déjà versés</span>
+                <span class="text-emerald-600">− ${fmtE(pas)}</span>
+              </div>` : ''}
+
+              <!-- IR à régler -->
+              <div class="flex justify-between ${pas > 0 ? '' : 'border-t border-slate-700/60 pt-1.5 mt-1'}">
+                <span class="${irAPayer >= 0 ? 'text-orange-400' : 'text-emerald-400'} font-semibold">
+                  ${irAPayer >= 0 ? '⚠ IR à régler (solde déclaration)' : '✓ Remboursement attendu'}
+                </span>
+                <span class="${irAPayer >= 0 ? 'text-orange-400' : 'text-emerald-400'} font-semibold">${fmtE(Math.abs(irAPayer))}</span>
+              </div>
+
+              <!-- Info taux -->
+              <div class="flex justify-between pt-0.5 text-slate-600">
+                <span>TMI / Taux moyen IR</span>
+                <span>${s.ir.txMarginal}% / ${s.ir.txMoyen}%</span>
+              </div>
+            </div>
+
+            <!-- Provision à constituer -->
+            <div class="mt-3 bg-slate-700/40 rounded-lg px-3 py-2 space-y-1 text-xs">
+              <div class="text-slate-400 font-medium mb-1">💰 À provisionner</div>
+              ${s.csgMontant > 0 ? `<div class="flex justify-between">
+                <span class="text-slate-500">CSG/CRDS SASU</span>
+                <span class="text-red-400">${fmtE(s.csgMontant)}</span>
+              </div>` : ''}
+              <div class="flex justify-between">
+                <span class="text-slate-500">Solde IR déclaration</span>
+                <span class="${irAPayer >= 0 ? 'text-red-400' : 'text-emerald-500'}">${irAPayer >= 0 ? fmtE(irAPayer) : '− ' + fmtE(Math.abs(irAPayer))}</span>
+              </div>
+              <div class="flex justify-between font-semibold border-t border-slate-600 pt-1 mt-1">
+                <span class="text-white">Total à sortir</span>
+                <span class="text-red-300">${fmtE(totalAProvisionner)}</span>
+              </div>
+            </div>
+
+            <!-- Net -->
+            <div class="mt-3 pt-3 border-t-2 ${highlight ? 'border-blue-700' : 'border-slate-600'}">
+              <div class="flex justify-between items-end">
+                <div>
+                  <div class="text-xs text-slate-500 mb-0.5">Net d'impôt</div>
+                  <div class="${s.netImpot >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold text-xl">${fmtE(s.netImpot)}</div>
+                </div>
+                <div class="text-right">
+                  <div class="text-slate-600 text-xs">Prélèvements / assiette</div>
+                  <div class="text-slate-400 text-sm font-medium">${tauxPrelevement}%</div>
+                  <div class="text-slate-600 text-xs">Net conservé</div>
+                  <div class="${s.netImpot >= 0 ? 'text-emerald-600' : 'text-red-600'} text-sm font-medium">${pctNet}%</div>
+                </div>
+              </div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  };
+
+  return `
+  ${renderBloc(assietteCour, '📍 Assiette courante (confirmée)')}
+  <div class="border-t border-slate-700 my-4"></div>
+  ${renderBloc(assietteFin, `📅 Assiette prévisionnelle ${_bilanAnnee}`)}`;
+}
+
+function renderSimuFiscale(soc) {
+  if (soc.regime_fiscal !== 'ir') return '';
+  const cfg = getBilanIRConfig(soc.id);
+  const isMarie = cfg.situation === 'marie' || cfg.situation === 'pacse';
+
+  return `
+  <div class="mt-8 pt-6 border-t-2 border-slate-600">
+    <h3 class="text-white font-bold text-base mb-5">🧮 Simulation fiscale — SASU à l'IR</h3>
+
+    <!-- Paramètres IR -->
+    <details class="bg-slate-800/60 border border-slate-700 rounded-xl mb-6" open>
+      <summary class="flex items-center justify-between px-4 py-3 cursor-pointer select-none list-none">
+        <span class="text-slate-300 text-sm font-medium">Paramètres IR personnels <span class="text-slate-600 font-normal">(votre foyer fiscal, hors BNC de la SASU)</span></span>
+        <span class="chevron text-slate-500 text-xs">▾</span>
+      </summary>
+      <div class="px-4 pb-4 pt-3 border-t border-slate-700">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div>
+            <label class="label">Situation</label>
+            <select id="fi-sit" class="input" onchange="saveBilanIRConfig('${soc.id}')">
+              ${[['celibataire','Célibataire'],['marie','Marié(e)'],['pacse','Pacsé(e)'],['divorce','Divorcé(e)'],['veuf','Veuf/Veuve']]
+                .map(([v,l]) => `<option value="${v}" ${cfg.situation===v?'selected':''}>${l}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="label">Enfants à charge</label>
+            <input id="fi-enf" class="input" type="number" min="0" value="${cfg.nbEnfants}" onchange="saveBilanIRConfig('${soc.id}')" />
+          </div>
+          <div>
+            <label class="label">Salaires : mode</label>
+            <select id="fi-mode" class="input" onchange="saveBilanIRConfig('${soc.id}')">
+              <option value="brut" ${cfg.salaires_mode==='brut'?'selected':''}>Brut</option>
+              <option value="net" ${cfg.salaires_mode==='net'?'selected':''}>Net fiscal</option>
+            </select>
+          </div>
+          <div>
+            <label class="label">Salaires vous (€)</label>
+            <input id="fi-sal-v" class="input" type="number" min="0" value="${cfg.salaires_vous || ''}" placeholder="0" onchange="saveBilanIRConfig('${soc.id}')" />
+          </div>
+          <div id="fi-sal-c-wrap" ${!isMarie ? 'style="display:none"' : ''}>
+            <label class="label">Salaires conjoint (€)</label>
+            <input id="fi-sal-c" class="input" type="number" min="0" value="${cfg.salaires_conjoint || ''}" placeholder="0" onchange="saveBilanIRConfig('${soc.id}')" />
+          </div>
+          <div>
+            <label class="label">Revenus fonciers nets (€)</label>
+            <input id="fi-fonc" class="input" type="number" min="0" value="${cfg.foncier || ''}" placeholder="0" onchange="saveBilanIRConfig('${soc.id}')" />
+          </div>
+          <div>
+            <label class="label">Micro-foncier brut (€)</label>
+            <input id="fi-mfonc" class="input" type="number" min="0" value="${cfg.micro_foncier || ''}" placeholder="0" onchange="saveBilanIRConfig('${soc.id}')" />
+          </div>
+          <div>
+            <label class="label">PER déductible (€)</label>
+            <input id="fi-per" class="input" type="number" min="0" value="${cfg.per || ''}" placeholder="0" onchange="saveBilanIRConfig('${soc.id}')" />
+          </div>
+          <div>
+            <label class="label">PAS déjà versé (€)</label>
+            <input id="fi-pas" class="input" type="number" min="0" value="${cfg.pas_vous || ''}" placeholder="0" onchange="saveBilanIRConfig('${soc.id}')" />
+          </div>
+        </div>
+        <p class="text-slate-600 text-xs mt-3">Sauvegarde automatique · Le BNC de la SASU est injecté automatiquement depuis votre résultat prévisionnel.</p>
+      </div>
+    </details>
+
+    <!-- Résultats -->
+    <div id="fi-resultats">${renderFiscalResultats(soc)}</div>
+  </div>`;
 }
 
 // ─── DÉPENSES — CRUD ─────────────────────────────────────────────────────────
