@@ -5,6 +5,7 @@ const STATE_DEFAULTS = {
   missions: [],
   cra_entries: [],
   depenses: [],
+  paiements: [],
   simulations_ir: [],
   exercices_fiscaux: [],
 };
@@ -948,6 +949,39 @@ function overrideCRADispo(missionId, annee, mois, societeId) {
   renderSocieteDetail(document.getElementById('app'), societeId);
 }
 
+// ─── PAIEMENTS — HELPERS ─────────────────────────────────────────────────────
+
+function getPaiement(missionId, anneeFact, moisFact) {
+  return (STATE.paiements || []).find(
+    p => p.mission_id === missionId && p.annee_fact == anneeFact && p.mois_fact == moisFact
+  ) || null;
+}
+
+function togglePaiement(missionId, anneeFact, moisFact, societeId) {
+  if (!STATE.paiements) STATE.paiements = [];
+  const existing = getPaiement(missionId, anneeFact, moisFact);
+  if (existing) {
+    // Si déjà reçu → repasser en attente; si en attente → supprimer
+    if (existing.recu) {
+      existing.recu = false;
+    } else {
+      STATE.paiements = STATE.paiements.filter(p => p !== existing);
+    }
+  } else {
+    STATE.paiements.push({
+      id: uid(), mission_id: missionId, societe_id: societeId,
+      annee_fact: anneeFact, mois_fact: moisFact,
+      recu: true, date_reception: new Date().toISOString().slice(0, 10),
+    });
+  }
+  saveState();
+  const contentDiv = document.getElementById('soc-content');
+  if (contentDiv) {
+    const soc = (STATE.societes || []).find(s => s.id === societeId);
+    if (soc) contentDiv.innerHTML = renderSocBilan(soc);
+  }
+}
+
 // ─── BILAN COMPTABLE — CALCULS ───────────────────────────────────────────────
 
 let _bilanAnnee = new Date().getFullYear();
@@ -986,35 +1020,55 @@ function calcDepenseMois(dep, annee, mois) {
 }
 
 // Encaissements prévisionnels pour un mois/année (CA facturé décalé du délai de paiement)
+// Chaque entrée est annotée avec recu: true/false/null
+// recu: true = paiement confirmé, false = en attente explicite, null = pas encore de statut
 function calcEncaissementsMois(societeId, annee, mois) {
   const missions = getMissionsActives(societeId);
-  let totalHT = 0, totalTTC = 0;
+  let totalHT = 0, totalTTC = 0, totalRecuHT = 0;
   const detail = [];
   missions.forEach(m => {
     const decalage = Math.round((m.delai_paiement || 30) / 30);
-    // Quel mois a été facturé pour être encaissé ce mois-ci ?
     let mFact = mois - decalage;
     let aFact = annee;
     while (mFact <= 0) { mFact += 12; aFact--; }
     if (isMoisHorsMission(m, aFact, mFact)) return;
     const c = calcCRACell(m, aFact, mFact);
     if (c.caHT > 0) {
+      const p = getPaiement(m.id, aFact, mFact);
+      const recu = p ? p.recu : null; // null = pas encore statué
       totalHT  += c.caHT;
       totalTTC += c.caTTC;
-      detail.push({ client: m.client, caHT: c.caHT, caTTC: c.caTTC, moisFact: mFact, anneeFact: aFact, tva: m.tva });
+      if (recu === true) totalRecuHT += c.caHT;
+      detail.push({ missionId: m.id, client: m.client, caHT: c.caHT, caTTC: c.caTTC,
+                    moisFact: mFact, anneeFact: aFact, tva: m.tva, recu });
     }
   });
-  return { totalHT, totalTTC, detail };
+  return { totalHT, totalTTC, totalRecuHT, detail };
 }
 
-// Totaux annuels revenus
+// Totaux annuels revenus (prévisionnel complet + confirmé)
 function calcEncaissementsAnnee(societeId, annee) {
-  let caHT = 0, caTTC = 0;
+  let caHT = 0, caTTC = 0, recuHT = 0;
   for (let m = 1; m <= 12; m++) {
     const e = calcEncaissementsMois(societeId, annee, m);
-    caHT += e.totalHT; caTTC += e.totalTTC;
+    caHT += e.totalHT; caTTC += e.totalTTC; recuHT += e.totalRecuHT;
   }
-  return { caHT, caTTC };
+  return { caHT, caTTC, recuHT };
+}
+
+// Assiette courante = CA confirmé reçu sur TOUTES les années (revenus réellement en poche)
+function calcAssietteCourante(societeId) {
+  const missions = getMissionsActives(societeId);
+  let total = 0;
+  (STATE.paiements || [])
+    .filter(p => p.societe_id === societeId && p.recu === true)
+    .forEach(p => {
+      const m = missions.find(x => x.id === p.mission_id);
+      if (!m) return;
+      const c = calcCRACell(m, p.annee_fact, p.mois_fact);
+      total += c.caHT;
+    });
+  return total;
 }
 
 // Totaux annuels dépenses
@@ -1051,154 +1105,220 @@ function renderSocBilan(soc) {
   const depenses = getDepenses(soc.id);
   const moisLabels = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
   const now = new Date();
-  const moisCourant = now.getMonth() + 1;
+  const moisCourant   = now.getMonth() + 1;
   const anneeCourante = now.getFullYear();
 
   // ── Pré-calcul par mois ──────────────────────────────────────────────────
   const moisData = Array.from({ length: 12 }, (_, i) => {
     const mois = i + 1;
     const enc  = calcEncaissementsMois(soc.id, annee, mois);
-    const deps = depenses.map(d => ({ dep: d, ht: calcDepenseMois(d, annee, mois) }));
-    const totDepsHT  = deps.reduce((s, x) => s + x.ht, 0);
-    const totDepsTTC = deps.reduce((s, x) => s + x.ht * (1 + (x.dep.tva_taux || 0)), 0);
-    return { mois, enc, deps, totDepsHT, totDepsTTC,
-             resultatHT: enc.totalHT - totDepsHT };
+    const totDepsHT = depenses.reduce((s, d) => s + calcDepenseMois(d, annee, mois), 0);
+    return { mois, enc, totDepsHT, resultatHT: enc.totalHT - totDepsHT };
   });
 
-  const totEnc  = calcEncaissementsAnnee(soc.id, annee);
-  const totDeps = calcDepensesAnnee(soc.id, annee);
-  const totRes  = totEnc.caHT - totDeps.totalHT;
+  // ── Assiettes & totaux ───────────────────────────────────────────────────
+  const totEnc      = calcEncaissementsAnnee(soc.id, annee);   // { caHT, recuHT }
+  const totDeps     = calcDepensesAnnee(soc.id, annee);
+  const assietteCourante  = calcAssietteCourante(soc.id);       // confirmé toutes années
+  const assietteFin       = totEnc.caHT;                        // prévisionnel année
+  const resultatFin       = assietteFin - totDeps.totalHT;
+  const resultatCourant   = assietteCourante - totDeps.totalHT; // approximatif
 
   // ── CSS helpers ──────────────────────────────────────────────────────────
-  const TH = (cur) => `px-3 py-2 text-center text-xs font-semibold border-r border-slate-700 min-w-[90px] ${cur ? 'bg-blue-900/40 text-blue-200' : 'bg-slate-700 text-slate-200'}`;
-  const TD = (cur, extra = '') => `px-3 py-2 text-center text-sm border-r border-slate-600 ${cur ? 'bg-blue-950/40' : ''} ${extra}`;
-  const TDL = `px-3 py-2 text-left text-xs border-r border-slate-700 sticky left-0 z-10`;
+  const TH  = (cur) => `px-2 py-2 text-center text-xs font-semibold border-r border-slate-700 min-w-[100px] ${cur ? 'bg-blue-900/40 text-blue-200' : 'bg-slate-700 text-slate-200'}`;
+  const TD  = (cur, extra = '') => `px-2 py-1.5 text-center text-xs border-r border-slate-600 ${cur ? 'bg-blue-950/30' : ''} ${extra}`;
+  const TDL = `px-3 py-2 text-left text-xs border-r border-slate-700 sticky left-0 z-10 min-w-[200px]`;
+  const COL_TOTAL = `px-3 py-2 text-center text-xs font-bold border-r border-slate-500`;
 
   const thead = `
   <thead>
     <tr class="border-b-2 border-slate-500">
-      <th class="${TDL} bg-slate-700 text-slate-300 font-semibold min-w-[210px]"></th>
+      <th class="${TDL} bg-slate-700 text-slate-400 font-medium"></th>
       ${moisLabels.map((l, i) => `<th class="${TH(annee === anneeCourante && i+1 === moisCourant)}">${l}</th>`).join('')}
-      <th class="px-3 py-2 text-center text-xs font-bold bg-slate-600 text-white border-r border-slate-500 min-w-[100px]">Total</th>
+      <th class="${COL_TOTAL} bg-slate-600 text-white min-w-[105px]">Total ${annee}</th>
     </tr>
   </thead>`;
 
   // ── Section REVENUS ──────────────────────────────────────────────────────
-  // Ligne de revenus par mission
   const missionEncRows = missions.map(m => {
     const decalage = Math.round((m.delai_paiement || 30) / 30);
+    let totRecu = 0, totAttendu = 0;
+
     const cells = moisData.map(md => {
       const isCur = annee === anneeCourante && md.mois === moisCourant;
-      const enc = md.enc.detail.find(d => d.client === m.client);
-      const val = enc ? enc.caHT : 0;
-      return `<td class="${TD(isCur, 'bg-slate-800/30')}">${val > 0 ? `<span class="text-slate-200">${fmtE(val)}</span>` : '<span class="text-slate-700">—</span>'}</td>`;
+      const enc = md.enc.detail.find(d => d.missionId === m.id);
+      if (!enc) return `<td class="${TD(isCur, 'bg-slate-800/20')}"><span class="text-slate-800">—</span></td>`;
+
+      if (enc.recu === true)  totRecu    += enc.caHT;
+      if (enc.recu !== true)  totAttendu += enc.caHT;
+
+      // État du paiement : true=confirmé, false=en attente explicit, null=non statué
+      const btnCls  = enc.recu === true
+        ? 'bg-emerald-700 text-white hover:bg-emerald-600'
+        : enc.recu === false
+          ? 'bg-amber-900/60 text-amber-400 hover:bg-amber-800/60'
+          : 'bg-slate-700 text-slate-500 hover:bg-slate-600 hover:text-slate-300';
+      const btnIcon = enc.recu === true ? '✓' : enc.recu === false ? '⏳' : '○';
+      const btnTitle = enc.recu === true
+        ? 'Paiement confirmé — cliquer pour repasser en attente'
+        : 'Cliquer pour confirmer la réception du paiement';
+
+      const cellBg = enc.recu === true ? 'bg-emerald-950/30' : enc.recu === false ? 'bg-amber-950/20' : 'bg-slate-800/20';
+
+      return `<td class="${TD(isCur, cellBg)}">
+        <div class="flex flex-col items-center gap-0.5">
+          <span class="${enc.recu === true ? 'text-emerald-300' : enc.recu === false ? 'text-amber-400/70' : 'text-slate-400'} font-medium">${fmtE(enc.caHT)}</span>
+          <button onclick="togglePaiement('${m.id}',${enc.anneeFact},${enc.moisFact},'${soc.id}')"
+            class="text-xs px-1.5 py-0 rounded ${btnCls} transition-colors leading-4"
+            title="${btnTitle}">${btnIcon}</button>
+        </div>
+      </td>`;
     }).join('');
-    // Total annuel encaissé pour cette mission
-    let totM = 0;
-    moisData.forEach(md => {
-      const enc = md.enc.detail.find(d => d.client === m.client);
-      if (enc) totM += enc.caHT;
-    });
+
+    const totM = totRecu + totAttendu;
     return `<tr class="border-b border-slate-700/40">
-      <td class="${TDL} bg-slate-800/30 text-slate-400 pl-6">${m.client}
-        ${decalage > 0 ? `<span class="ml-1 text-slate-600 text-xs">+${decalage}m</span>` : ''}
+      <td class="${TDL} bg-slate-800/20">
+        <span class="text-slate-300">${m.client}</span>
+        ${decalage > 0 ? `<span class="ml-1 text-slate-600">+${decalage}m</span>` : ''}
       </td>
       ${cells}
-      <td class="px-3 py-2 text-center text-sm border-r border-slate-500 bg-slate-700/40 font-medium text-slate-200">${totM > 0 ? fmtE(totM) : '—'}</td>
+      <td class="${COL_TOTAL} bg-slate-700/30">
+        ${totRecu > 0 ? `<div class="text-emerald-400">✓ ${fmtE(totRecu)}</div>` : ''}
+        ${totAttendu > 0 ? `<div class="text-slate-400">${fmtE(totAttendu)}</div>` : ''}
+        ${totM === 0 ? '<span class="text-slate-700">—</span>' : ''}
+      </td>
     </tr>`;
   }).join('');
 
+  // Ligne total revenus (confirmés en vert, attendus en gris)
   const revenusRow = `
-  <tr class="border-b border-slate-500 bg-emerald-950/40">
-    <td class="${TDL} bg-emerald-950/60 text-emerald-300 font-bold text-sm">💰 Revenus encaissés HT</td>
+  <tr class="border-b border-slate-500">
+    <td class="${TDL} bg-emerald-950/50 text-emerald-300 font-bold">Total revenus HT</td>
     ${moisData.map(md => {
       const isCur = annee === anneeCourante && md.mois === moisCourant;
-      return `<td class="${TD(isCur, 'font-bold')}">
-        ${md.enc.totalHT > 0 ? `<span class="text-emerald-400">${fmtE(md.enc.totalHT)}</span>` : '<span class="text-slate-700">—</span>'}
+      const recu  = md.enc.totalRecuHT;
+      const att   = md.enc.totalHT - recu;
+      return `<td class="${TD(isCur, 'bg-emerald-950/20 font-medium')}">
+        ${recu  > 0 ? `<div class="text-emerald-400 leading-4">✓ ${fmtE(recu)}</div>` : ''}
+        ${att   > 0 ? `<div class="text-slate-400 leading-4">${fmtE(att)}</div>` : ''}
+        ${md.enc.totalHT === 0 ? '<span class="text-slate-800">—</span>' : ''}
       </td>`;
     }).join('')}
-    <td class="px-3 py-2 text-center font-bold border-r border-slate-500 bg-emerald-900/40 text-emerald-300">${fmtE(totEnc.caHT)}</td>
+    <td class="${COL_TOTAL} bg-emerald-900/40">
+      <div class="text-emerald-300 font-bold">${fmtE(totEnc.caHT)}</div>
+      ${totEnc.recuHT > 0 ? `<div class="text-emerald-500 text-xs">dont ✓ ${fmtE(totEnc.recuHT)}</div>` : ''}
+    </td>
   </tr>`;
 
   // ── Section DÉPENSES ─────────────────────────────────────────────────────
-  // Regrouper par catégorie
-  const cats = [...new Set(depenses.map(d => d.categorie))];
   const depRows = depenses.length === 0
-    ? `<tr><td colspan="${14}" class="px-3 py-4 text-center text-slate-600 text-sm italic">Aucune dépense renseignée</td></tr>`
+    ? `<tr><td colspan="14" class="px-3 py-4 text-center text-slate-600 text-xs italic">Aucune dépense — cliquez sur "+ Ajouter une dépense"</td></tr>`
     : depenses.map(dep => {
         const cells = moisData.map(md => {
           const isCur = annee === anneeCourante && md.mois === moisCourant;
           const ht = calcDepenseMois(dep, annee, md.mois);
-          return `<td class="${TD(isCur, 'bg-slate-800/20')}">${ht > 0 ? `<span class="text-red-300">${fmtE(ht)}</span>` : '<span class="text-slate-700">—</span>'}</td>`;
+          return `<td class="${TD(isCur, 'bg-slate-800/20')}">${ht > 0 ? `<span class="text-red-300">${fmtE(ht)}</span>` : '<span class="text-slate-800">—</span>'}</td>`;
         }).join('');
         let totD = 0;
         for (let m = 1; m <= 12; m++) totD += calcDepenseMois(dep, annee, m);
-        return `<tr class="border-b border-slate-700/40 group">
-          <td class="${TDL} bg-slate-800/20 pl-6">
-            <div class="flex items-center justify-between gap-2">
-              <div>
-                <span class="text-slate-300 text-xs">${dep.label}</span>
-                <span class="ml-1 text-slate-600 text-xs">${_perioLabel(dep.periodicite)}</span>
-              </div>
-              <div class="hidden group-hover:flex gap-1 shrink-0">
-                <button onclick="openDepenseModal('${soc.id}','${dep.id}')" class="text-slate-500 hover:text-slate-200 text-xs px-1">✏</button>
-                <button onclick="deleteDepense('${dep.id}','${soc.id}')" class="text-red-700 hover:text-red-400 text-xs px-1">✕</button>
+        return `<tr class="border-b border-slate-700/30 group">
+          <td class="${TDL} bg-slate-800/20">
+            <div class="flex items-center justify-between">
+              <span class="text-slate-400">${dep.label} <span class="text-slate-700">${_perioLabel(dep.periodicite)}</span></span>
+              <div class="hidden group-hover:flex gap-1 ml-2 shrink-0">
+                <button onclick="openDepenseModal('${soc.id}','${dep.id}')" class="text-slate-500 hover:text-white text-xs">✏</button>
+                <button onclick="deleteDepense('${dep.id}','${soc.id}')" class="text-red-800 hover:text-red-400 text-xs ml-1">✕</button>
               </div>
             </div>
           </td>
           ${cells}
-          <td class="px-3 py-2 text-center text-sm border-r border-slate-500 bg-slate-700/30 font-medium text-red-300">${totD > 0 ? fmtE(totD) : '—'}</td>
+          <td class="${COL_TOTAL} bg-slate-700/30 text-red-300">${totD > 0 ? fmtE(totD) : '—'}</td>
         </tr>`;
       }).join('');
 
   const depTotRow = `
-  <tr class="border-b border-slate-500 bg-red-950/40">
-    <td class="${TDL} bg-red-950/60 text-red-300 font-bold text-sm">📤 Total dépenses HT</td>
+  <tr class="border-b border-slate-500">
+    <td class="${TDL} bg-red-950/50 text-red-300 font-bold">Total dépenses HT</td>
     ${moisData.map(md => {
       const isCur = annee === anneeCourante && md.mois === moisCourant;
-      return `<td class="${TD(isCur, 'font-bold')}">
-        ${md.totDepsHT > 0 ? `<span class="text-red-400">${fmtE(md.totDepsHT)}</span>` : '<span class="text-slate-700">—</span>'}
+      return `<td class="${TD(isCur, 'bg-red-950/20 font-medium')}">
+        ${md.totDepsHT > 0 ? `<span class="text-red-400">${fmtE(md.totDepsHT)}</span>` : '<span class="text-slate-800">—</span>'}
       </td>`;
     }).join('')}
-    <td class="px-3 py-2 text-center font-bold border-r border-slate-500 bg-red-900/40 text-red-300">${totDeps.totalHT > 0 ? fmtE(totDeps.totalHT) : '—'}</td>
+    <td class="${COL_TOTAL} bg-red-900/40 text-red-300 font-bold">${totDeps.totalHT > 0 ? fmtE(totDeps.totalHT) : '—'}</td>
   </tr>`;
 
   // ── Section RÉSULTAT ─────────────────────────────────────────────────────
   const resultatRow = `
-  <tr class="border-b-2 border-slate-400">
-    <td class="${TDL} bg-slate-700 text-white font-bold text-sm">📊 Résultat brut HT</td>
+  <tr>
+    <td class="${TDL} bg-slate-700 text-white font-bold">Résultat brut HT</td>
     ${moisData.map(md => {
       const isCur = annee === anneeCourante && md.mois === moisCourant;
-      const res = md.resultatHT;
-      const color = res > 0 ? 'text-emerald-400' : res < 0 ? 'text-red-400' : 'text-slate-500';
+      const r = md.resultatHT;
+      const col = r > 0 ? 'text-emerald-400' : r < 0 ? 'text-red-400' : 'text-slate-600';
       return `<td class="${TD(isCur, 'bg-slate-700 font-bold')}">
-        <span class="${color}">${res !== 0 ? fmtE(res) : '—'}</span>
+        <span class="${col}">${r !== 0 ? fmtE(r) : '—'}</span>
       </td>`;
     }).join('')}
-    <td class="px-3 py-2 text-center font-bold border-r border-slate-500 bg-slate-600">
-      <span class="${totRes > 0 ? 'text-emerald-400' : totRes < 0 ? 'text-red-400' : 'text-slate-400'} text-base">${fmtE(totRes)}</span>
+    <td class="${COL_TOTAL} bg-slate-600">
+      <span class="${resultatFin > 0 ? 'text-emerald-400' : 'text-red-400'} font-bold text-sm">${fmtE(resultatFin)}</span>
     </td>
   </tr>`;
 
-  // ── KPIs résumé ──────────────────────────────────────────────────────────
-  const tauxCharges = totEnc.caHT > 0 ? Math.round(totDeps.totalHT / totEnc.caHT * 100) : 0;
+  // ── KPIs ─────────────────────────────────────────────────────────────────
+  const enAttente = totEnc.caHT - totEnc.recuHT;
   const kpis = `
-  <div class="grid grid-cols-3 gap-4 mb-4">
-    <div class="bg-emerald-950/40 border border-emerald-800/40 rounded-xl p-4">
-      <div class="text-emerald-500 text-xs uppercase tracking-wide mb-1">Revenus encaissés</div>
-      <div class="text-emerald-300 font-bold text-xl">${fmtE(totEnc.caHT)}</div>
-      ${totEnc.caTTC !== totEnc.caHT ? `<div class="text-emerald-700 text-xs mt-0.5">${fmtE(totEnc.caTTC)} TTC</div>` : ''}
+  <div class="grid grid-cols-2 gap-3 mb-5">
+
+    <!-- Assiette courante -->
+    <div class="bg-slate-800 border border-slate-600 rounded-xl p-4">
+      <div class="text-slate-400 text-xs uppercase tracking-wide font-medium mb-3">📍 Assiette courante (paiements confirmés)</div>
+      <div class="flex items-end justify-between">
+        <div>
+          <div class="text-white font-bold text-2xl">${fmtE(assietteCourante)}</div>
+          <div class="text-slate-500 text-xs mt-0.5">CA effectivement reçu</div>
+        </div>
+        <div class="text-right">
+          <div class="text-red-400 text-sm font-medium">− ${fmtE(totDeps.totalHT)}</div>
+          <div class="text-slate-500 text-xs">dépenses estimées</div>
+        </div>
+      </div>
+      <div class="mt-3 pt-3 border-t border-slate-700 flex items-center justify-between">
+        <span class="text-slate-400 text-xs">Résultat actuel estimé</span>
+        <span class="${resultatCourant >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${fmtE(resultatCourant)}</span>
+      </div>
+      ${enAttente > 0 ? `<div class="mt-2 text-amber-600 text-xs">⏳ ${fmtE(enAttente)} en attente de confirmation</div>` : ''}
     </div>
-    <div class="bg-red-950/30 border border-red-800/30 rounded-xl p-4">
-      <div class="text-red-500 text-xs uppercase tracking-wide mb-1">Dépenses</div>
-      <div class="text-red-300 font-bold text-xl">${fmtE(totDeps.totalHT)}</div>
-      <div class="text-slate-600 text-xs mt-0.5">${tauxCharges}% du CA</div>
+
+    <!-- Assiette fin d'année -->
+    <div class="bg-slate-800 border border-slate-600 rounded-xl p-4">
+      <div class="text-slate-400 text-xs uppercase tracking-wide font-medium mb-3">📅 Assiette prévisionnelle ${annee}</div>
+      <div class="flex items-end justify-between">
+        <div>
+          <div class="text-white font-bold text-2xl">${fmtE(assietteFin)}</div>
+          <div class="text-slate-500 text-xs mt-0.5">CA total prévu sur l'année</div>
+        </div>
+        <div class="text-right">
+          <div class="text-red-400 text-sm font-medium">− ${fmtE(totDeps.totalHT)}</div>
+          <div class="text-slate-500 text-xs">dépenses estimées</div>
+        </div>
+      </div>
+      <div class="mt-3 pt-3 border-t border-slate-700 flex items-center justify-between">
+        <span class="text-slate-400 text-xs">Résultat prévisionnel fin ${annee}</span>
+        <span class="${resultatFin >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${fmtE(resultatFin)}</span>
+      </div>
+      <div class="mt-2 text-slate-600 text-xs">avant charges sociales & impôts</div>
     </div>
-    <div class="border rounded-xl p-4 ${totRes >= 0 ? 'bg-blue-950/30 border-blue-800/30' : 'bg-red-950/40 border-red-700/40'}">
-      <div class="${totRes >= 0 ? 'text-blue-400' : 'text-red-400'} text-xs uppercase tracking-wide mb-1">Résultat brut</div>
-      <div class="${totRes >= 0 ? 'text-white' : 'text-red-300'} font-bold text-xl">${fmtE(totRes)}</div>
-      <div class="text-slate-600 text-xs mt-0.5">avant charges sociales & impôts</div>
-    </div>
+
+  </div>`;
+
+  // ── Légende statuts ──────────────────────────────────────────────────────
+  const legende = `
+  <div class="flex items-center gap-4 mb-3 text-xs text-slate-500">
+    <span class="flex items-center gap-1"><span class="bg-emerald-700 text-white px-1 rounded text-xs">✓</span> Paiement reçu</span>
+    <span class="flex items-center gap-1"><span class="bg-amber-900/60 text-amber-400 px-1 rounded text-xs">⏳</span> En attente explicite</span>
+    <span class="flex items-center gap-1"><span class="bg-slate-700 text-slate-500 px-1 rounded text-xs">○</span> Non statué</span>
+    <span class="text-slate-600 ml-2">Cliquer sur le bouton dans chaque cellule pour changer le statut</span>
   </div>`;
 
   return `
@@ -1211,23 +1331,24 @@ function renderSocBilan(soc) {
     <button onclick="openDepenseModal('${soc.id}',null)" class="btn-primary text-sm">+ Ajouter une dépense</button>
   </div>
   ${kpis}
+  ${legende}
   <div class="overflow-x-auto rounded-xl border border-slate-600 shadow-xl mb-6">
-    <table class="w-full text-sm border-collapse" style="min-width:${210 + 12*90 + 100}px">
+    <table class="w-full text-sm border-collapse" style="min-width:${200 + 12*100 + 105}px">
       ${thead}
       <tbody>
-        <!-- REVENUS -->
-        <tr class="bg-slate-700/80 border-b border-slate-500">
-          <td colspan="${14}" class="px-3 py-1.5 text-xs font-bold text-emerald-400 uppercase tracking-wider sticky left-0 bg-slate-700/80">Revenus</td>
+        <tr class="bg-slate-700/60 border-b border-slate-500">
+          <td colspan="14" class="px-3 py-1 text-xs font-bold text-emerald-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Revenus</td>
         </tr>
-        ${missions.length > 0 ? missionEncRows : '<tr><td colspan="14" class="px-3 py-3 text-center text-slate-600 text-xs italic pl-6">Aucune mission active — configurez vos missions dans l\'onglet CRA</td></tr>'}
+        ${missions.length > 0 ? missionEncRows : `<tr><td colspan="14" class="px-6 py-3 text-slate-600 text-xs italic">Aucune mission active</td></tr>`}
         ${revenusRow}
-        <!-- DÉPENSES -->
-        <tr class="bg-slate-700/80 border-b border-slate-500">
-          <td colspan="${14}" class="px-3 py-1.5 text-xs font-bold text-red-400 uppercase tracking-wider sticky left-0 bg-slate-700/80">Dépenses</td>
+        <tr class="bg-slate-700/60 border-b border-slate-500">
+          <td colspan="14" class="px-3 py-1 text-xs font-bold text-red-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Dépenses</td>
         </tr>
         ${depRows}
         ${depTotRow}
-        <!-- RÉSULTAT -->
+        <tr class="bg-slate-700/60 border-b border-slate-500">
+          <td colspan="14" class="px-3 py-1 text-xs font-bold text-slate-300 uppercase tracking-wider sticky left-0 bg-slate-700/60">Résultat</td>
+        </tr>
         ${resultatRow}
       </tbody>
     </table>
