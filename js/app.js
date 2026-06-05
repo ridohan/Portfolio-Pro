@@ -1,0 +1,990 @@
+// ─── STATE ───────────────────────────────────────────────────────────────────
+
+let STATE = {
+  societes: [],
+  simulations_ir: [],
+  exercices_fiscaux: [],
+  ui_prefs: [],
+};
+
+// ─── ROUTER ──────────────────────────────────────────────────────────────────
+
+function navigate(hash) { location.hash = hash; }
+
+window.addEventListener('hashchange', render);
+window.addEventListener('load', render);
+
+// ─── PRÉFÉRENCES UI ──────────────────────────────────────────────────────────
+
+function getUiPref(key, defaultVal = null) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw !== null) return JSON.parse(raw);
+  } catch {}
+  if (Array.isArray(STATE.ui_prefs)) {
+    const pref = STATE.ui_prefs.find(p => p.key === key);
+    if (pref?.value !== undefined && pref.value !== '') {
+      try { return JSON.parse(pref.value); } catch { return pref.value; }
+    }
+  }
+  return defaultVal;
+}
+
+function persistUiPref(key, value) {
+  const serialized = JSON.stringify(value);
+  try { localStorage.setItem(key, serialized); } catch {}
+  if (!Array.isArray(STATE.ui_prefs)) STATE.ui_prefs = [];
+  const idx = STATE.ui_prefs.findIndex(p => p.key === key);
+  if (idx !== -1) STATE.ui_prefs[idx].value = serialized;
+  else STATE.ui_prefs.push({ key, value: serialized });
+  API.saveUiPref(key, serialized).catch(() => {});
+}
+
+// ─── RENDER ──────────────────────────────────────────────────────────────────
+
+async function render() {
+  const app = document.getElementById('app');
+  if (!API.isConfigured()) return renderSetup(app);
+
+  const isDemo = API.url === 'demo';
+  const cached = API._getCache();
+  if (cached) {
+    STATE = cached;
+  } else if (isDemo) {
+    // Mode démo : STATE vide, pas de fetch
+  } else {
+    app.innerHTML = `<div class="flex items-center justify-center h-64 text-slate-400">Chargement…</div>`;
+    try {
+      STATE = await API.getData();
+    } catch (e) {
+      app.innerHTML = errorBanner(e.message); return;
+    }
+    if (Array.isArray(STATE.ui_prefs)) {
+      STATE.ui_prefs.forEach(p => {
+        if (p.key && p.value !== undefined && p.value !== '') {
+          try { localStorage.setItem(p.key, p.value); } catch {}
+        }
+      });
+    }
+  }
+
+  const hash = location.hash || '#dashboard';
+  const [route, id] = hash.slice(1).split('/');
+
+  if      (route === 'dashboard')  renderDashboard(app);
+  else if (route === 'ir')         renderSimulateurIR(app, id);
+  else if (route === 'societes' && !id) renderSocietes(app);
+  else if (route === 'societes' &&  id) renderSocieteDetail(app, id);
+  else renderDashboard(app);
+}
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+
+function fmt(n, decimals = 0) {
+  if (n == null || isNaN(n)) return '—';
+  return new Intl.NumberFormat('fr-FR', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  }).format(n);
+}
+
+function fmtE(n, decimals = 0) { return fmt(n, decimals) + ' €'; }
+function fmtPct(n, decimals = 2) { return fmt(n, decimals) + ' %'; }
+
+function uid() { return '_' + Math.random().toString(36).slice(2, 9); }
+
+function errorBanner(msg) {
+  return `<div class="m-6 p-4 bg-red-900/30 border border-red-700 rounded-xl text-red-300 text-sm">${msg}</div>`;
+}
+
+function badge(label, color = 'slate') {
+  const c = {
+    blue:   'bg-blue-900/40 text-blue-300',
+    green:  'bg-emerald-900/40 text-emerald-300',
+    orange: 'bg-orange-900/40 text-orange-300',
+    red:    'bg-red-900/40 text-red-300',
+    slate:  'bg-slate-700 text-slate-300',
+    purple: 'bg-purple-900/40 text-purple-300',
+  }[color] || 'bg-slate-700 text-slate-300';
+  return `<span class="inline-block px-2 py-0.5 rounded text-xs font-medium ${c}">${label}</span>`;
+}
+
+// ─── NAV ─────────────────────────────────────────────────────────────────────
+
+function navBar(activeRoute) {
+  const links = [
+    { hash: '#dashboard', label: 'Dashboard',  icon: '⊞' },
+    { hash: '#ir',        label: 'Simulateur IR', icon: '📊' },
+    { hash: '#societes',  label: 'Sociétés',    icon: '🏢' },
+  ];
+  const items = links.map(l => {
+    const active = activeRoute === l.hash.slice(1).split('/')[0];
+    return `<a href="${l.hash}" class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${active ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}">${l.icon} ${l.label}</a>`;
+  }).join('');
+
+  return `
+  <nav class="sticky top-0 z-40 bg-slate-900/95 backdrop-blur border-b border-slate-700/50 px-4 py-2">
+    <div class="max-w-6xl mx-auto flex items-center gap-2">
+      <span class="text-white font-bold mr-4 text-sm">Portfolio Pro</span>
+      ${items}
+      <div class="ml-auto flex gap-2">
+        <button onclick="openSettings()" class="btn-secondary text-xs px-2 py-1">⚙ Paramètres</button>
+      </div>
+    </div>
+  </nav>`;
+}
+
+// ─── SETUP ───────────────────────────────────────────────────────────────────
+
+function renderSetup(app) {
+  app.innerHTML = `
+  <div class="min-h-screen flex items-center justify-center p-6">
+    <div class="modal-box max-w-md w-full">
+      <h2 class="text-lg font-bold text-white mb-1">Configuration initiale</h2>
+      <p class="text-slate-400 text-sm mb-4">Connectez votre Google Sheet via AppScript.</p>
+      <div class="space-y-3">
+        <div>
+          <label class="label">URL AppScript Web App</label>
+          <input id="cfg-url" class="input" placeholder="https://script.google.com/macros/s/…/exec" />
+        </div>
+        <div>
+          <label class="label">Token secret</label>
+          <input id="cfg-token" class="input" type="password" placeholder="votre token" />
+        </div>
+      </div>
+      <div class="flex gap-3 mt-5">
+        <button class="btn-primary flex-1" onclick="saveSetup()">Enregistrer et continuer</button>
+        <button class="btn-secondary" onclick="skipSetup()">Mode démo</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function saveSetup() {
+  const url   = document.getElementById('cfg-url').value.trim();
+  const token = document.getElementById('cfg-token').value.trim();
+  if (!url || !token) return alert('Veuillez remplir les deux champs.');
+  API.save(url, token);
+  render();
+}
+
+function skipSetup() {
+  localStorage.setItem('pro_appscript_url',   'demo');
+  localStorage.setItem('pro_appscript_token', 'demo');
+  render();
+}
+
+function openSettings() {
+  const ttl = API.getCacheTTLMinutes();
+  const age = API.cacheAge();
+  const ageStr = age != null ? `Cache âgé de ${age}s` : 'Pas de cache';
+
+  document.body.insertAdjacentHTML('beforeend', `
+  <div id="settings-modal" class="modal-backdrop" onclick="if(event.target===this)closeSettings()">
+    <div class="modal-box">
+      <h3 class="text-base font-semibold text-white mb-4">Paramètres</h3>
+      <div class="space-y-4">
+        <div>
+          <label class="label">TTL cache (minutes)</label>
+          <input id="s-ttl" class="input" type="number" min="1" value="${ttl}" />
+        </div>
+        <p class="text-slate-500 text-xs">${ageStr}</p>
+        <div class="flex flex-col gap-2">
+          <button class="btn-secondary text-sm" onclick="forceRefresh()">Forcer rechargement</button>
+          <button class="btn-secondary text-sm" onclick="exportCache()">Exporter cache JSON</button>
+        </div>
+        <hr class="border-slate-600" />
+        <div>
+          <label class="label">URL AppScript</label>
+          <input id="s-url" class="input" value="${API.url || ''}" />
+        </div>
+        <div>
+          <label class="label">Token</label>
+          <input id="s-token" class="input" type="password" value="${API.token || ''}" />
+        </div>
+      </div>
+      <div class="flex gap-3 mt-5">
+        <button class="btn-primary flex-1" onclick="saveSettings()">Enregistrer</button>
+        <button class="btn-secondary" onclick="closeSettings()">Fermer</button>
+      </div>
+    </div>
+  </div>`);
+}
+
+function closeSettings() { document.getElementById('settings-modal')?.remove(); }
+
+function saveSettings() {
+  const url   = document.getElementById('s-url').value.trim();
+  const token = document.getElementById('s-token').value.trim();
+  const ttl   = document.getElementById('s-ttl').value;
+  if (url && token) API.save(url, token);
+  if (ttl) API.setCacheTTL(ttl);
+  closeSettings();
+}
+
+async function forceRefresh() {
+  closeSettings();
+  API.clearCache();
+  await render();
+}
+
+function exportCache() {
+  const raw = localStorage.getItem('portfoliopro_cache');
+  if (!raw) return alert('Pas de cache à exporter.');
+  const blob = new Blob([raw], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `portfoliopro_cache_${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+}
+
+// ─── DASHBOARD ───────────────────────────────────────────────────────────────
+
+function renderDashboard(app) {
+  const societes = STATE.societes || [];
+  const simuls   = STATE.simulations_ir || [];
+
+  const cardsHtml = societes.length === 0
+    ? `<div class="col-span-full text-center py-12 text-slate-500">
+        <p class="text-lg mb-2">Aucune société configurée</p>
+        <a href="#societes" class="btn-primary text-sm">Ajouter une société</a>
+       </div>`
+    : societes.map(s => {
+        const forme = { ei: 'EI', eurl: 'EURL', sarl: 'SARL', sas: 'SAS', sasu: 'SASU', snc: 'SNC', sci: 'SCI' }[s.forme] || s.forme;
+        const regime = s.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue');
+        return `
+        <a href="#societes/${s.id}" class="block bg-slate-800 rounded-xl p-4 border border-slate-700 hover:border-blue-500 transition-colors">
+          <div class="flex items-start justify-between mb-2">
+            <span class="font-semibold text-white">${s.nom}</span>
+            ${regime}
+          </div>
+          <div class="text-slate-400 text-sm">${forme}</div>
+          ${s.capital ? `<div class="text-slate-500 text-xs mt-1">Capital : ${fmtE(s.capital)}</div>` : ''}
+        </a>`;
+      }).join('');
+
+  const lastSimHtml = simuls.length > 0 ? `
+    <div class="bg-slate-800 rounded-xl border border-slate-700 p-4">
+      <h3 class="font-semibold text-white mb-3">Dernières simulations IR</h3>
+      <div class="space-y-2">
+        ${simuls.slice(-5).reverse().map(s => `
+          <a href="#ir/${s.id}" class="flex items-center justify-between py-2 border-b border-slate-700/50 hover:text-blue-400 transition-colors">
+            <span class="text-sm text-slate-300">${s.nom || 'Simulation sans titre'}</span>
+            <span class="text-xs text-slate-500">${s.annee || ''}</span>
+          </a>`).join('')}
+      </div>
+      <a href="#ir" class="btn-secondary text-xs mt-3 block text-center">Nouvelle simulation</a>
+    </div>` : '';
+
+  app.innerHTML = `
+  ${navBar('dashboard')}
+  <div class="max-w-6xl mx-auto px-4 py-6">
+    <div class="flex items-center justify-between mb-6">
+      <h1 class="text-xl font-bold text-white">Dashboard</h1>
+      <a href="#societes" class="btn-primary text-sm">+ Société</a>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+      ${cardsHtml}
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="bg-slate-800 rounded-xl border border-slate-700 p-4">
+        <h3 class="font-semibold text-white mb-3">Accès rapide</h3>
+        <div class="grid grid-cols-2 gap-3">
+          <a href="#ir" class="bg-slate-700 hover:bg-slate-600 rounded-lg p-3 text-center transition-colors">
+            <div class="text-2xl mb-1">📊</div>
+            <div class="text-sm text-slate-300">Simulateur IR</div>
+          </a>
+          <a href="#societes" class="bg-slate-700 hover:bg-slate-600 rounded-lg p-3 text-center transition-colors">
+            <div class="text-2xl mb-1">🏢</div>
+            <div class="text-sm text-slate-300">Mes sociétés</div>
+          </a>
+        </div>
+      </div>
+      ${lastSimHtml}
+    </div>
+  </div>`;
+}
+
+// ─── SOCIÉTÉS ────────────────────────────────────────────────────────────────
+
+function renderSocietes(app) {
+  const societes = STATE.societes || [];
+
+  const rows = societes.length === 0
+    ? `<div class="text-center py-12 text-slate-500">Aucune société. Cliquez sur "+ Ajouter".</div>`
+    : `<div class="space-y-3">${societes.map(s => {
+        const forme = { ei: 'EI', eurl: 'EURL', sarl: 'SARL', sas: 'SAS', sasu: 'SASU', snc: 'SNC', sci: 'SCI' }[s.forme] || s.forme;
+        return `
+        <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 flex items-center justify-between">
+          <div>
+            <span class="font-semibold text-white">${s.nom}</span>
+            <span class="ml-2 text-slate-500 text-sm">${forme}</span>
+            <span class="ml-2">${s.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue')}</span>
+            ${s.capital ? `<span class="ml-2 text-slate-400 text-xs">Capital ${fmtE(s.capital)}</span>` : ''}
+          </div>
+          <div class="flex gap-2">
+            <button onclick="openSocieteModal('${s.id}')" class="btn-secondary text-xs">Modifier</button>
+            <button onclick="deleteSociete('${s.id}')" class="btn-danger text-xs">Suppr.</button>
+          </div>
+        </div>`;
+      }).join('')}</div>`;
+
+  app.innerHTML = `
+  ${navBar('societes')}
+  <div class="max-w-4xl mx-auto px-4 py-6">
+    <div class="flex items-center justify-between mb-6">
+      <h1 class="text-xl font-bold text-white">Mes sociétés</h1>
+      <button onclick="openSocieteModal()" class="btn-primary text-sm">+ Ajouter</button>
+    </div>
+    ${rows}
+  </div>`;
+}
+
+function renderSocieteDetail(app, id) {
+  const soc = (STATE.societes || []).find(s => s.id === id);
+  if (!soc) return app.innerHTML = navBar('societes') + errorBanner('Société introuvable.');
+
+  app.innerHTML = `
+  ${navBar('societes')}
+  <div class="max-w-4xl mx-auto px-4 py-6">
+    <div class="flex items-center gap-3 mb-6">
+      <a href="#societes" class="text-slate-400 hover:text-white text-sm">← Sociétés</a>
+      <h1 class="text-xl font-bold text-white">${soc.nom}</h1>
+      ${soc.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue')}
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+      <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 space-y-3">
+        <h3 class="font-semibold text-white">Informations</h3>
+        <div class="flex justify-between text-sm"><span class="text-slate-400">Forme juridique</span><span class="text-white">${soc.forme?.toUpperCase()}</span></div>
+        <div class="flex justify-between text-sm"><span class="text-slate-400">Régime fiscal</span><span class="text-white">${soc.regime_fiscal?.toUpperCase()}</span></div>
+        ${soc.capital ? `<div class="flex justify-between text-sm"><span class="text-slate-400">Capital</span><span class="text-white">${fmtE(soc.capital)}</span></div>` : ''}
+        ${soc.date_creation ? `<div class="flex justify-between text-sm"><span class="text-slate-400">Création</span><span class="text-white">${soc.date_creation}</span></div>` : ''}
+        ${soc.note ? `<div class="text-sm text-slate-400 pt-2 border-t border-slate-700">${soc.note}</div>` : ''}
+      </div>
+      <div class="bg-slate-800 rounded-xl border border-slate-700 p-4">
+        <h3 class="font-semibold text-white mb-3">Actions</h3>
+        <div class="space-y-2">
+          <button onclick="openSocieteModal('${soc.id}')" class="btn-secondary w-full text-sm">Modifier la société</button>
+          ${soc.regime_fiscal === 'ir' ? `<a href="#ir" class="btn-primary block text-center w-full text-sm mt-2">Simuler IR avec cette société</a>` : ''}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function openSocieteModal(id) {
+  const soc = id ? (STATE.societes || []).find(s => s.id === id) : null;
+  const v = soc || { id: uid(), nom: '', forme: 'sas', regime_fiscal: 'is', capital: '', date_creation: '', note: '' };
+
+  document.body.insertAdjacentHTML('beforeend', `
+  <div id="soc-modal" class="modal-backdrop" onclick="if(event.target===this)closeSocieteModal()">
+    <div class="modal-box">
+      <h3 class="text-base font-semibold text-white mb-4">${soc ? 'Modifier' : 'Ajouter'} une société</h3>
+      <div class="space-y-3">
+        <div>
+          <label class="label">Raison sociale *</label>
+          <input id="sm-nom" class="input" value="${v.nom}" placeholder="Ma Société SAS" />
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="label">Forme juridique</label>
+            <select id="sm-forme" class="input">
+              ${['ei','eurl','sarl','sas','sasu','snc','sci'].map(f =>
+                `<option value="${f}" ${v.forme===f?'selected':''}>${f.toUpperCase()}</option>`
+              ).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="label">Régime fiscal</label>
+            <select id="sm-regime" class="input">
+              <option value="is" ${v.regime_fiscal==='is'?'selected':''}>IS</option>
+              <option value="ir" ${v.regime_fiscal==='ir'?'selected':''}>IR</option>
+            </select>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="label">Capital (€)</label>
+            <input id="sm-capital" class="input" type="number" value="${v.capital || ''}" placeholder="10000" />
+          </div>
+          <div>
+            <label class="label">Date création</label>
+            <input id="sm-date" class="input" type="date" value="${v.date_creation || ''}" />
+          </div>
+        </div>
+        <div>
+          <label class="label">Note</label>
+          <textarea id="sm-note" class="input" rows="2" placeholder="Informations complémentaires…">${v.note || ''}</textarea>
+        </div>
+      </div>
+      <div class="flex gap-3 mt-5">
+        <button class="btn-primary flex-1" onclick="saveSociete('${v.id}')">Enregistrer</button>
+        <button class="btn-secondary" onclick="closeSocieteModal()">Annuler</button>
+      </div>
+    </div>
+  </div>`);
+}
+
+function closeSocieteModal() { document.getElementById('soc-modal')?.remove(); }
+
+async function saveSociete(id) {
+  const data = {
+    id,
+    nom:            document.getElementById('sm-nom').value.trim(),
+    forme:          document.getElementById('sm-forme').value,
+    regime_fiscal:  document.getElementById('sm-regime').value,
+    capital:        parseFloat(document.getElementById('sm-capital').value) || null,
+    date_creation:  document.getElementById('sm-date').value || null,
+    note:           document.getElementById('sm-note').value.trim() || null,
+  };
+  if (!data.nom) return alert('Le nom est obligatoire.');
+
+  const idx = (STATE.societes || []).findIndex(s => s.id === id);
+  if (idx !== -1) STATE.societes[idx] = data;
+  else { if (!STATE.societes) STATE.societes = []; STATE.societes.push(data); }
+
+  closeSocieteModal();
+  renderSocietes(document.getElementById('app'));
+
+  try { await API.saveSociete(data); } catch(e) { console.warn('saveSociete:', e); }
+}
+
+async function deleteSociete(id) {
+  if (!confirm('Supprimer cette société ?')) return;
+  STATE.societes = (STATE.societes || []).filter(s => s.id !== id);
+  renderSocietes(document.getElementById('app'));
+  try { await API.deleteSociete(id); } catch(e) { console.warn('deleteSociete:', e); }
+}
+
+// ─── BARÈMES PAR ANNÉE DE REVENUS ────────────────────────────────────────────
+// Chaque entrée correspond à une année de revenus (ex: 2024 = revenus déclarés en 2025).
+// Ajouter une entrée ici suffit pour supporter une nouvelle année.
+
+const BAREMES = {
+  2024: {
+    label: 'Revenus 2024 — déclaration 2025',
+    tranches: [
+      { min: 0,      max: 11497,   taux: 0    },
+      { min: 11497,  max: 29315,   taux: 0.11 },
+      { min: 29315,  max: 83823,   taux: 0.30 },
+      { min: 83823,  max: 180294,  taux: 0.41 },
+      { min: 180294, max: Infinity, taux: 0.45 },
+    ],
+    plafond_demi_part:  1791,
+    abatt_sal_min:      495,
+    abatt_sal_max:      14171,
+    decote_cel_seuil:   1929,  decote_cel_base:  873,
+    decote_cpl_seuil:   3191,  decote_cpl_base:  1444,
+    decote_taux:        0.4525,
+    cehr_cel_s1: 250000, cehr_cel_s2: 500000,
+    cehr_cpl_s1: 500000, cehr_cpl_s2: 1000000,
+  },
+  2025: {
+    label: 'Revenus 2025 — déclaration 2026',
+    tranches: [
+      { min: 0,      max: 11600,   taux: 0    },
+      { min: 11600,  max: 29579,   taux: 0.11 },
+      { min: 29579,  max: 84577,   taux: 0.30 },
+      { min: 84577,  max: 181917,  taux: 0.41 },
+      { min: 181917, max: Infinity, taux: 0.45 },
+    ],
+    plafond_demi_part:  1791,
+    abatt_sal_min:      495,
+    abatt_sal_max:      14171,
+    // Bases décote revalorísées ~+0,9% vs 2024 (confirmé par recalcul sur simulateur officiel)
+    decote_cel_seuil:   1982,  decote_cel_base:  897,
+    decote_cpl_seuil:   3275,  decote_cpl_base:  1483,
+    decote_taux:        0.4525,
+    cehr_cel_s1: 250000, cehr_cel_s2: 500000,
+    cehr_cpl_s1: 500000, cehr_cpl_s2: 1000000,
+  },
+};
+
+function calcParts(situation, nbEnfants) {
+  let parts = situation === 'marie' ? 2 : 1;
+  const enfants = Math.max(0, Math.floor(nbEnfants));
+  if (enfants >= 1) parts += 0.5;
+  if (enfants >= 2) parts += 0.5;
+  if (enfants >= 3) parts += (enfants - 2) * 1;
+  return parts;
+}
+
+function calcImpotBareme(revenuImposable, tranches) {
+  let impot = 0;
+  const detail = [];
+  for (const t of tranches) {
+    if (revenuImposable <= t.min) break;
+    const base = Math.min(revenuImposable, t.max) - t.min;
+    const montant = base * t.taux;
+    detail.push({ taux: t.taux, base: Math.round(base), montant: Math.round(montant) });
+    impot += montant;
+  }
+  return { impot: Math.round(impot), detail };
+}
+
+function calcIR(params) {
+  const {
+    annee             = 2025,
+    situation         = 'celibataire',
+    nbEnfants         = 0,
+    salaires_mode     = 'brut',
+    salaires          = 0,
+    bic_bnc           = 0,
+    foncier           = 0,
+    dividendes_bareme = 0,
+    dividendes_pfu    = 0,
+    pv_bareme         = 0,
+    pv_pfu            = 0,
+    autres            = 0,
+  } = params;
+
+  const b = BAREMES[annee] || BAREMES[2025];
+
+  // 1. Abattement 10% sur salaires (sauf si l'utilisateur saisit déjà le net fiscal)
+  const abatt10 = (salaires_mode === 'net' || salaires === 0)
+    ? 0
+    : Math.min(Math.max(salaires * 0.10, b.abatt_sal_min), b.abatt_sal_max);
+  const salairesNet = Math.max(0, salaires - abatt10);
+
+  // 2. Abattement 40% sur dividendes option barème
+  const abatt40 = dividendes_bareme * 0.40;
+  const dividendesBaremeNet = dividendes_bareme * 0.60;
+
+  // 3. Revenu net global
+  const revenuNetGlobal = salairesNet + bic_bnc + foncier + dividendesBaremeNet + pv_bareme + autres;
+
+  // 4. Quotient familial
+  const nbParts   = calcParts(situation, nbEnfants);
+  const baseParts = situation === 'marie' ? 2 : 1;
+
+  // 5. Impôt base (sans enfants)
+  const impotBase_raw = calcImpotBareme(revenuNetGlobal / baseParts, b.tranches);
+  const impotBase     = impotBase_raw.impot * baseParts;
+
+  // 6. Impôt avec QF complet (avec enfants)
+  const impotAvecQF_raw = calcImpotBareme(revenuNetGlobal / nbParts, b.tranches);
+  const impotAvecQF     = impotAvecQF_raw.impot * nbParts;
+
+  // 7. Plafonnement QF
+  const demiPartsSupp   = (nbParts - baseParts) * 2;
+  const avantageQF      = Math.max(0, impotBase - impotAvecQF);
+  const plafondAvantage = b.plafond_demi_part * demiPartsSupp;
+  const avantageReel    = demiPartsSupp > 0 ? Math.min(avantageQF, plafondAvantage) : 0;
+  const impotBrut       = Math.round(impotBase - avantageReel);
+
+  // Détail tranches — affiché sur nbParts (QF réel de l'utilisateur)
+  // Le plafonnement QF est montré séparément comme correction
+  const detailTranches = impotAvecQF_raw.detail.map(t => ({
+    ...t,
+    base:    Math.round(t.base * nbParts),
+    montant: Math.round(t.montant * nbParts),
+  }));
+  const impotQFBrut = impotAvecQF; // avant correction plafonnement
+  const correctionPlafond = demiPartsSupp > 0 && avantageQF > plafondAvantage
+    ? Math.round(avantageQF - plafondAvantage) // montant récupéré par le plafonnement
+    : 0;
+
+  // 8. Décote
+  let decote = 0;
+  if (situation === 'marie') {
+    if (impotBrut < b.decote_cpl_seuil)
+      decote = Math.max(0, Math.round(b.decote_cpl_base - b.decote_taux * impotBrut));
+  } else {
+    if (impotBrut < b.decote_cel_seuil)
+      decote = Math.max(0, Math.round(b.decote_cel_base - b.decote_taux * impotBrut));
+  }
+  const impotNet = Math.max(0, impotBrut - decote);
+
+  // 9. CEHR
+  const rfr = revenuNetGlobal + dividendes_pfu + pv_pfu;
+  let cehr = 0;
+  if (situation === 'marie') {
+    if (rfr > b.cehr_cpl_s2)      cehr = (rfr - b.cehr_cpl_s2) * 0.04 + (b.cehr_cpl_s2 - b.cehr_cpl_s1) * 0.03;
+    else if (rfr > b.cehr_cpl_s1) cehr = (rfr - b.cehr_cpl_s1) * 0.03;
+  } else {
+    if (rfr > b.cehr_cel_s2)      cehr = (rfr - b.cehr_cel_s2) * 0.04 + (b.cehr_cel_s2 - b.cehr_cel_s1) * 0.03;
+    else if (rfr > b.cehr_cel_s1) cehr = (rfr - b.cehr_cel_s1) * 0.03;
+  }
+  cehr = Math.round(cehr);
+
+  // 10. PFU 30% (12,8% IR + 17,2% PS)
+  const pfuDiv   = Math.round(dividendes_pfu * 0.30);
+  const pfuDivIR = Math.round(dividendes_pfu * 0.128);
+  const pfuDivPS = Math.round(dividendes_pfu * 0.172);
+  const pfuPV    = Math.round(pv_pfu * 0.30);
+  const pfuPVIR  = Math.round(pv_pfu * 0.128);
+  const pfuPVPS  = Math.round(pv_pfu * 0.172);
+
+  const totalPFU    = pfuDiv + pfuPV;
+  const totalImpots = impotNet + cehr + totalPFU;
+
+  const revenuTotal = salaires + bic_bnc + foncier + dividendes_bareme + dividendes_pfu + pv_bareme + pv_pfu + autres;
+  const txMoyen     = revenuTotal > 0 ? (totalImpots / revenuTotal) * 100 : 0;
+
+  // Taux marginal
+  let txMarginal = 0;
+  for (let i = b.tranches.length - 1; i >= 0; i--) {
+    if ((revenuNetGlobal / nbParts) > b.tranches[i].min) {
+      txMarginal = b.tranches[i].taux * 100;
+      break;
+    }
+  }
+
+  return {
+    // Inputs recap
+    salairesNet, abatt10, abatt40, dividendesBaremeNet,
+    revenuNetGlobal, rfr, nbParts, baseParts,
+    // Barème
+    detailTranches, impotBase, impotQFBrut, correctionPlafond,
+    avantageQF, avantageReel, plafondAvantage,
+    impotBrut, decote, impotNet, cehr,
+    // PFU
+    pfuDiv, pfuDivIR, pfuDivPS,
+    pfuPV,  pfuPVIR, pfuPVPS,
+    // Totaux
+    totalPFU, totalImpots,
+    txMoyen: Math.round(txMoyen * 100) / 100,
+    txMarginal,
+  };
+}
+
+// ─── SIMULATEUR IR — VUE ─────────────────────────────────────────────────────
+
+let _irState = {
+  annee:              2025,
+  situation:          'celibataire',
+  nbEnfants:          0,
+  salaires_mode:      'brut', // 'brut' = j'applique abattement 10% | 'net' = revenu net fiscal direct
+  salaires:           0,
+  bic_bnc:            0,
+  foncier:            0,
+  dividendes_bareme:  0,
+  dividendes_pfu:     0,
+  pv_bareme:          0,
+  pv_pfu:             0,
+  autres:             0,
+};
+
+function renderSimulateurIR(app, simId) {
+  app.innerHTML = `
+  ${navBar('ir')}
+  <div class="max-w-6xl mx-auto px-4 py-6">
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <h1 class="text-xl font-bold text-white">Simulateur IR</h1>
+        <p class="text-slate-400 text-sm mt-0.5" id="ir-subtitle">${BAREMES[_irState.annee]?.label || ''}</p>
+      </div>
+      <button onclick="saveSimulationIR()" class="btn-secondary text-sm">💾 Sauvegarder</button>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+      <!-- Formulaire -->
+      <div class="lg:col-span-2 space-y-4">
+        ${renderIRForm()}
+      </div>
+      <!-- Résultats -->
+      <div class="lg:col-span-3" id="ir-results">
+        ${renderIRResults()}
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderIRForm() {
+  const s = _irState;
+  const anneesOptions = Object.keys(BAREMES).sort((a,b) => b - a).map(y =>
+    `<option value="${y}" ${s.annee == y ? 'selected' : ''}>${BAREMES[y].label}</option>`
+  ).join('');
+
+  return `
+  <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 space-y-4">
+    <h3 class="font-semibold text-white">Situation fiscale</h3>
+    <div>
+      <label class="label">Année de revenus</label>
+      <select class="input" onchange="updateIR('annee', parseInt(this.value)); document.getElementById('ir-subtitle').textContent = BAREMES[parseInt(this.value)]?.label || ''">
+        ${anneesOptions}
+      </select>
+    </div>
+    <div>
+      <label class="label">Situation familiale</label>
+      <select class="input" onchange="updateIR('situation', this.value)">
+        <option value="celibataire" ${s.situation==='celibataire'?'selected':''}>Célibataire / Divorcé</option>
+        <option value="marie"       ${s.situation==='marie'?'selected':''}>Marié / Pacsé</option>
+        <option value="veuf"        ${s.situation==='veuf'?'selected':''}>Veuf</option>
+      </select>
+    </div>
+    <div>
+      <label class="label">Nombre d'enfants à charge</label>
+      <input class="input" type="number" min="0" value="${s.nbEnfants}"
+        onchange="updateIR('nbEnfants', parseInt(this.value)||0)" />
+    </div>
+  </div>
+
+  <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 space-y-3">
+    <h3 class="font-semibold text-white">Revenus</h3>
+
+    <div class="space-y-1">
+      <label class="label">Salaires / traitements</label>
+      <div class="flex gap-1 mb-1">
+        <button onclick="updateIR('salaires_mode','brut')"
+          class="flex-1 text-xs py-1 rounded transition-colors ${s.salaires_mode!=='net' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">
+          Brut <span class="opacity-70">(abatt. 10% auto)</span>
+        </button>
+        <button onclick="updateIR('salaires_mode','net')"
+          class="flex-1 text-xs py-1 rounded transition-colors ${s.salaires_mode==='net' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">
+          Net fiscal <span class="opacity-70">(après abatt.)</span>
+        </button>
+      </div>
+      <input class="input" type="number" min="0" value="${s.salaires||''}"
+        placeholder="0" onchange="updateIR('salaires', parseFloat(this.value)||0)" />
+    </div>
+
+    <div>
+      <label class="label">BIC / BNC — résultat net (€)</label>
+      <input class="input" type="number" value="${s.bic_bnc||''}"
+        placeholder="0" onchange="updateIR('bic_bnc', parseFloat(this.value)||0)" />
+    </div>
+
+    <div>
+      <label class="label">Revenus fonciers nets (€)</label>
+      <input class="input" type="number" min="0" value="${s.foncier||''}"
+        placeholder="0" onchange="updateIR('foncier', parseFloat(this.value)||0)" />
+    </div>
+
+    <hr class="border-slate-600" />
+
+    <div class="space-y-1">
+      <label class="label">Dividendes — option barème (€)</label>
+      <p class="text-slate-500 text-xs -mt-1">Abattement 40% + intégration au barème IR</p>
+      <input class="input" type="number" min="0" value="${s.dividendes_bareme||''}"
+        placeholder="0" onchange="updateIR('dividendes_bareme', parseFloat(this.value)||0)" />
+    </div>
+
+    <div class="space-y-1">
+      <label class="label">Dividendes — PFU / flat tax (€)</label>
+      <p class="text-slate-500 text-xs -mt-1">Flat tax 30% (12,8% IR + 17,2% PS)</p>
+      <input class="input" type="number" min="0" value="${s.dividendes_pfu||''}"
+        placeholder="0" onchange="updateIR('dividendes_pfu', parseFloat(this.value)||0)" />
+    </div>
+
+    <hr class="border-slate-600" />
+
+    <div class="space-y-1">
+      <label class="label">Plus-values mobilières — option barème (€)</label>
+      <input class="input" type="number" min="0" value="${s.pv_bareme||''}"
+        placeholder="0" onchange="updateIR('pv_bareme', parseFloat(this.value)||0)" />
+    </div>
+
+    <div class="space-y-1">
+      <label class="label">Plus-values mobilières — PFU (€)</label>
+      <input class="input" type="number" min="0" value="${s.pv_pfu||''}"
+        placeholder="0" onchange="updateIR('pv_pfu', parseFloat(this.value)||0)" />
+    </div>
+
+    <hr class="border-slate-600" />
+
+    <div>
+      <label class="label">Autres revenus imposables (€)</label>
+      <input class="input" type="number" value="${s.autres||''}"
+        placeholder="0" onchange="updateIR('autres', parseFloat(this.value)||0)" />
+    </div>
+  </div>`;
+}
+
+function updateIR(key, value) {
+  _irState[key] = value;
+  document.getElementById('ir-results').innerHTML = renderIRResults();
+}
+
+function renderIRResults() {
+  const r = calcIR(_irState);
+
+  const totalRevenu = (_irState.salaires||0) + (_irState.bic_bnc||0) + (_irState.foncier||0)
+    + (_irState.dividendes_bareme||0) + (_irState.dividendes_pfu||0)
+    + (_irState.pv_bareme||0) + (_irState.pv_pfu||0) + (_irState.autres||0);
+
+  if (totalRevenu === 0) {
+    return `<div class="bg-slate-800 rounded-xl border border-slate-700 p-8 text-center text-slate-500">
+      Saisissez vos revenus pour calculer l'impôt.
+    </div>`;
+  }
+
+  // Barre de progression des tranches
+  const barreHtml = r.detailTranches.filter(t => t.base > 0).map(t => {
+    const colors = { 0: 'bg-slate-600', 0.11: 'bg-emerald-600', 0.30: 'bg-yellow-500', 0.41: 'bg-orange-500', 0.45: 'bg-red-600' };
+    const w = Math.round((t.base / Math.max(r.revenuNetGlobal, 1)) * 100);
+    return `<div class="${colors[t.taux]||'bg-slate-500'} h-full rounded" style="width:${w}%" title="${t.taux*100}% : ${fmtE(t.base)}"></div>`;
+  }).join('');
+
+  const tranchesHtml = r.detailTranches.filter(t => t.base > 0).map(t => `
+    <tr class="border-b border-slate-700/50">
+      <td class="py-2 text-slate-400">${t.taux === 0 ? '0 %' : (t.taux*100) + ' %'}</td>
+      <td class="py-2 text-right text-slate-300">${fmtE(t.base)}</td>
+      <td class="py-2 text-right text-white font-medium">${fmtE(t.montant)}</td>
+    </tr>`).join('');
+
+  const pfuRows = [];
+  if (_irState.dividendes_pfu > 0) pfuRows.push(`
+    <tr class="border-b border-slate-700/50">
+      <td class="py-2 text-slate-400">Dividendes PFU 30%</td>
+      <td class="py-2 text-right text-slate-300">${fmtE(_irState.dividendes_pfu)}</td>
+      <td class="py-2 text-right text-white">${fmtE(r.pfuDiv)}</td>
+    </tr>`);
+  if (_irState.pv_pfu > 0) pfuRows.push(`
+    <tr class="border-b border-slate-700/50">
+      <td class="py-2 text-slate-400">Plus-values PFU 30%</td>
+      <td class="py-2 text-right text-slate-300">${fmtE(_irState.pv_pfu)}</td>
+      <td class="py-2 text-right text-white">${fmtE(r.pfuPV)}</td>
+    </tr>`);
+
+  return `
+  <!-- Métriques clés -->
+  <div class="grid grid-cols-3 gap-3 mb-4">
+    <div class="bg-slate-800 rounded-xl border border-slate-700 p-3 text-center">
+      <p class="text-slate-400 text-xs mb-1">Total impôts</p>
+      <p class="text-xl font-bold text-white">${fmtE(r.totalImpots)}</p>
+    </div>
+    <div class="bg-slate-800 rounded-xl border border-slate-700 p-3 text-center">
+      <p class="text-slate-400 text-xs mb-1">Taux moyen</p>
+      <p class="text-xl font-bold text-orange-400">${fmtPct(r.txMoyen)}</p>
+    </div>
+    <div class="bg-slate-800 rounded-xl border border-slate-700 p-3 text-center">
+      <p class="text-slate-400 text-xs mb-1">Taux marginal</p>
+      <p class="text-xl font-bold text-red-400">${fmtPct(r.txMarginal, 0)}</p>
+    </div>
+  </div>
+
+  <!-- Barre tranches -->
+  <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 mb-4">
+    <h3 class="font-semibold text-white mb-3">Décomposition par tranche</h3>
+    <div class="flex h-3 rounded overflow-hidden bg-slate-700 mb-4 gap-0.5">
+      ${barreHtml}
+    </div>
+    <div class="flex gap-3 flex-wrap text-xs text-slate-400 mb-4">
+      <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-slate-600 inline-block"></span>0%</span>
+      <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-emerald-600 inline-block"></span>11%</span>
+      <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-yellow-500 inline-block"></span>30%</span>
+      <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-orange-500 inline-block"></span>41%</span>
+      <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-red-600 inline-block"></span>45%</span>
+    </div>
+    <table class="w-full text-sm">
+      <thead><tr class="border-b border-slate-600">
+        <th class="text-left text-slate-400 pb-2 font-normal">Tranche</th>
+        <th class="text-right text-slate-400 pb-2 font-normal">Base</th>
+        <th class="text-right text-slate-400 pb-2 font-normal">Impôt</th>
+      </tr></thead>
+      <tbody>${tranchesHtml}</tbody>
+    </table>
+  </div>
+
+  <!-- Calcul IR barème -->
+  <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 mb-4">
+    <h3 class="font-semibold text-white mb-3">Calcul IR barème</h3>
+    <div class="space-y-2 text-sm">
+      <div class="flex justify-between">
+        <span class="text-slate-400">Revenu net global imposable</span>
+        <span class="text-white">${fmtE(r.revenuNetGlobal)}</span>
+      </div>
+      ${r.abatt10 > 0 ? `<div class="flex justify-between text-xs">
+        <span class="text-slate-500">dont abattement 10% salaires (auto)</span>
+        <span class="text-slate-400">−${fmtE(r.abatt10)}</span>
+      </div>` : _irState.salaires > 0 && _irState.salaires_mode === 'net' ? `<div class="flex justify-between text-xs">
+        <span class="text-slate-500">salaires saisis en net fiscal (abattement non recalculé)</span>
+        <span class="text-slate-400"></span>
+      </div>` : ''}
+      ${r.abatt40 > 0 ? `<div class="flex justify-between text-xs">
+        <span class="text-slate-500">dont abattement 40% dividendes</span>
+        <span class="text-slate-400">−${fmtE(r.abatt40)}</span>
+      </div>` : ''}
+      <div class="flex justify-between">
+        <span class="text-slate-400">Parts fiscales</span>
+        <span class="text-white">${r.nbParts}${r.nbParts > r.baseParts ? ` (base ${r.baseParts} + enfants)` : ''}</span>
+      </div>
+      <div class="flex justify-between border-t border-slate-700/50 pt-2">
+        <span class="text-slate-400">Impôt sur ${r.nbParts} parts</span>
+        <span class="text-white">${fmtE(r.impotQFBrut)}</span>
+      </div>
+      ${r.correctionPlafond > 0 ? `<div class="flex justify-between text-xs">
+        <span class="text-slate-500">Correction plafonnement QF (+${fmtE(r.correctionPlafond)} récupérés)</span>
+        <span class="text-orange-400">+${fmtE(r.correctionPlafond)}</span>
+      </div>` : ''}
+      <div class="flex justify-between border-t border-slate-700/50 pt-2">
+        <span class="text-slate-400">Impôt brut</span>
+        <span class="text-white">${fmtE(r.impotBrut)}</span>
+      </div>
+      ${r.decote > 0 ? `<div class="flex justify-between text-xs">
+        <span class="text-slate-500">Décote</span>
+        <span class="text-emerald-400">−${fmtE(r.decote)}</span>
+      </div>` : ''}
+      <div class="flex justify-between font-semibold border-t border-slate-700/50 pt-2">
+        <span class="text-slate-300">IR barème net</span>
+        <span class="text-white">${fmtE(r.impotNet)}</span>
+      </div>
+      ${r.cehr > 0 ? `<div class="flex justify-between">
+        <span class="text-slate-400">CEHR</span>
+        <span class="text-orange-400">${fmtE(r.cehr)}</span>
+      </div>` : ''}
+    </div>
+  </div>
+
+  <!-- PFU -->
+  ${pfuRows.length > 0 ? `
+  <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 mb-4">
+    <h3 class="font-semibold text-white mb-3">Prélèvement Forfaitaire Unique (PFU)</h3>
+    <table class="w-full text-sm">
+      <thead><tr class="border-b border-slate-600">
+        <th class="text-left text-slate-400 pb-2 font-normal">Source</th>
+        <th class="text-right text-slate-400 pb-2 font-normal">Base</th>
+        <th class="text-right text-slate-400 pb-2 font-normal">PFU 30%</th>
+      </tr></thead>
+      <tbody>${pfuRows.join('')}</tbody>
+    </table>
+    <p class="text-xs text-slate-500 mt-2">Dont prélèvements sociaux 17,2% inclus dans le PFU.</p>
+  </div>` : ''}
+
+  <!-- Récapitulatif final -->
+  <div class="bg-blue-900/20 rounded-xl border border-blue-700/50 p-4">
+    <h3 class="font-semibold text-white mb-3">Récapitulatif</h3>
+    <div class="space-y-2 text-sm">
+      <div class="flex justify-between">
+        <span class="text-slate-400">IR barème net</span>
+        <span class="text-white">${fmtE(r.impotNet)}</span>
+      </div>
+      ${r.cehr > 0 ? `<div class="flex justify-between"><span class="text-slate-400">CEHR</span><span class="text-white">${fmtE(r.cehr)}</span></div>` : ''}
+      ${r.totalPFU > 0 ? `<div class="flex justify-between"><span class="text-slate-400">PFU (dont PS)</span><span class="text-white">${fmtE(r.totalPFU)}</span></div>` : ''}
+      <div class="flex justify-between text-base font-bold border-t border-blue-700/50 pt-2">
+        <span class="text-white">Total impôts & prélèvements</span>
+        <span class="text-blue-300">${fmtE(r.totalImpots)}</span>
+      </div>
+      <div class="flex justify-between text-xs pt-1">
+        <span class="text-slate-500">Taux moyen global</span>
+        <span class="text-slate-300">${fmtPct(r.txMoyen)}</span>
+      </div>
+      <div class="flex justify-between text-xs">
+        <span class="text-slate-500">Taux marginal d'imposition</span>
+        <span class="text-slate-300">${fmtPct(r.txMarginal, 0)}</span>
+      </div>
+      <div class="flex justify-between text-xs">
+        <span class="text-slate-500">Revenu fiscal de référence</span>
+        <span class="text-slate-300">${fmtE(r.rfr)}</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function saveSimulationIR() {
+  const nom = prompt('Nom de la simulation :', `Simulation ${new Date().getFullYear()}`);
+  if (!nom) return;
+  const sim = {
+    id:         uid(),
+    nom,
+    annee:      new Date().getFullYear(),
+    situation:  _irState.situation,
+    nb_enfants: _irState.nbEnfants,
+    revenus:    JSON.stringify(_irState),
+    created_at: new Date().toISOString(),
+  };
+  if (!STATE.simulations_ir) STATE.simulations_ir = [];
+  STATE.simulations_ir.push(sim);
+  try { await API.saveSimulationIR(sim); } catch(e) { console.warn('saveSimulationIR:', e); }
+  alert('Simulation sauvegardée.');
+}
