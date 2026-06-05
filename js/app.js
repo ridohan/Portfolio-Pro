@@ -442,7 +442,7 @@ function isMoisHorsMission(mission, annee, mois) {
 
 // ─── CRA — ÉTAT LOCAL ─────────────────────────────────────────────────────────
 
-let _socTab    = 'fiche';
+let _socTab    = 'bilan';
 let _craAnnee  = new Date().getFullYear();
 
 function switchSocTab(tab, socId) {
@@ -462,10 +462,10 @@ function renderSocieteDetail(app, id) {
   if (!soc) return app.innerHTML = navBar('societes') + errorBanner('Société introuvable.');
 
   const tabs = [
-    { key: 'fiche',    label: 'Fiche' },
+    { key: 'bilan',    label: 'Bilan comptable' },
     { key: 'missions', label: `Missions (${getMissionsActives(id).length})` },
     { key: 'cra',      label: 'CRA Prévisionnel' },
-    { key: 'bilan',    label: 'Bilan comptable' },
+    { key: 'fiche',    label: 'Fiche' },
   ];
   const tabsHtml = tabs.map(t => `
     <button onclick="switchSocTab('${t.key}','${id}')"
@@ -1449,18 +1449,65 @@ function calcScenariosIR(assiette, cfg) {
 function renderFiscalResultats(soc) {
   const cfg          = getBilanIRConfig(soc.id);
   const totDepsHT    = calcDepensesAnnee(soc.id, _bilanAnnee).totalHT;
-  const assietteCour = Math.max(0, calcAssietteCourante(soc.id)        - totDepsHT);
-  const assietteInter= Math.max(0, calcAssietteIntermediaire(soc.id)   - totDepsHT);
+  const assietteCour = Math.max(0, calcAssietteCourante(soc.id)      - totDepsHT);
+  const assietteInter= Math.max(0, calcAssietteIntermediaire(soc.id) - totDepsHT);
   const assietteFin  = Math.max(0, calcEncaissementsAnnee(soc.id, _bilanAnnee).caHT - totDepsHT);
 
-  const renderBloc = (assiette, titreAssiette) => {
-    if (assiette <= 0) return `
+  // Pré-calculer les 3 sets pour pouvoir faire les deltas
+  const scenCour  = assietteCour  > 0 ? calcScenariosIR(assietteCour,  cfg) : null;
+  const scenInter = assietteInter > 0 ? calcScenariosIR(assietteInter, cfg) : null;
+  const scenFin   = assietteFin   > 0 ? calcScenariosIR(assietteFin,   cfg) : null;
+
+  // Bloc delta : comparaison scénario par scénario vs la base courante
+  const renderDelta = (scenComp, scenBase, assietteComp, assietteBase) => {
+    if (!scenComp || !scenBase) return '';
+    const dBNC = assietteComp - assietteBase;
+    return `
+    <div class="mt-4 pt-4 border-t border-slate-600">
+      <div class="flex items-baseline gap-3 mb-3">
+        <span class="text-xs text-slate-500 uppercase tracking-wide">Gain vs assiette courante</span>
+        <span class="text-xs text-slate-400">Δ BNC brut : <span class="${dBNC >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${dBNC >= 0 ? '+' : ''}${fmtE(dBNC)}</span></span>
+      </div>
+      <div class="grid grid-cols-3 gap-4">
+        ${scenComp.map((s, i) => {
+          const base = scenBase[i];
+          // Delta IR seul (resteAPayer plafonné à 0 si remboursement)
+          const dIR  = Math.max(0, s.ir.resteAPayer)    - Math.max(0, base.ir.resteAPayer);
+          // Delta CSG/CRDS séparé
+          const dCSG = s.csgMontant - base.csgMontant;
+          const dNet = s.netImpot   - base.netImpot;
+          const highlight = i === 1;
+          return `
+          <div class="rounded-lg border ${highlight ? 'border-blue-700/40 bg-blue-950/10' : 'border-slate-700/60 bg-slate-800/40'} px-3 py-2 text-xs">
+            <div class="text-slate-500 mb-2 font-medium">${s.label}</div>
+            <div class="flex justify-between mb-1">
+              <span class="text-slate-500">Δ BNC brut</span>
+              <span class="${dBNC >= 0 ? 'text-slate-300' : 'text-red-400'} font-medium">${dBNC >= 0 ? '+' : ''}${fmtE(dBNC)}</span>
+            </div>
+            <div class="flex justify-between mb-1">
+              <span class="text-slate-500">Δ IR (solde)</span>
+              <span class="${dIR >= 0 ? 'text-red-400' : 'text-emerald-400'} font-medium">${dIR >= 0 ? '+' : ''}${fmtE(dIR)}</span>
+            </div>
+            <div class="flex justify-between mb-1">
+              <span class="text-slate-500">Δ CSG/CRDS</span>
+              <span class="${dCSG > 0 ? 'text-red-400' : 'text-slate-600'} font-medium">${dCSG > 0 ? '+' + fmtE(dCSG) : '—'}</span>
+            </div>
+            <div class="flex justify-between border-t border-slate-700/60 pt-1.5 mt-1">
+              <span class="text-slate-300 font-semibold">Δ Net d'impôt</span>
+              <span class="${dNet >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold text-sm">${dNet >= 0 ? '+' : ''}${fmtE(dNet)}</span>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  };
+
+  const renderBloc = (assiette, titreAssiette, scenarios, deltaHtml = '') => {
+    if (assiette <= 0 || !scenarios) return `
     <div class="mb-6">
       <h4 class="text-xs text-slate-500 uppercase tracking-wide mb-2">${titreAssiette}</h4>
       <p class="text-slate-600 text-sm">Assiette nulle ou négative — pas de simulation.</p>
     </div>`;
-
-    const scenarios = calcScenariosIR(assiette, cfg);
 
     return `
     <div class="mb-8">
@@ -1488,9 +1535,9 @@ function renderFiscalResultats(soc) {
                 <span class="text-slate-500">CSG / CRDS (SASU)</span>
                 <span class="${s.csgMontant > 0 ? 'text-red-400' : 'text-slate-600'}">${s.csgMontant > 0 ? '− ' + fmtE(s.csgMontant) : '—'}</span>
               </div>
-              ${s.id === 's97' ? `<div class="pl-3 text-slate-600 text-xs leading-4 mb-1">
+              <div class="pl-3 text-xs leading-4 mb-1 ${s.id === 's97' ? 'text-slate-600' : 'invisible'}">
                 6,8 % CSG déductible de votre IR <em>N+1</em> (non pris en compte ici)
-              </div>` : ''}
+              </div>
 
               <!-- Base IR -->
               <div class="flex justify-between border-t border-slate-700/60 pt-1.5 mt-1">
@@ -1544,10 +1591,10 @@ function renderFiscalResultats(soc) {
             <!-- Provision à constituer -->
             <div class="mt-3 bg-slate-700/40 rounded-lg px-3 py-2 space-y-1 text-xs">
               <div class="text-slate-400 font-medium mb-1">💰 À provisionner</div>
-              ${s.csgMontant > 0 ? `<div class="flex justify-between">
+              <div class="flex justify-between">
                 <span class="text-slate-500">CSG/CRDS SASU</span>
-                <span class="text-red-400">${fmtE(s.csgMontant)}</span>
-              </div>` : ''}
+                <span class="${s.csgMontant > 0 ? 'text-red-400' : 'text-slate-600'}">${s.csgMontant > 0 ? fmtE(s.csgMontant) : '—'}</span>
+              </div>
               <div class="flex justify-between">
                 <span class="text-slate-500">Solde IR déclaration</span>
                 <span class="${irAPayer >= 0 ? 'text-red-400' : 'text-emerald-500'}">${irAPayer >= 0 ? fmtE(irAPayer) : '− ' + fmtE(Math.abs(irAPayer))}</span>
@@ -1576,15 +1623,16 @@ function renderFiscalResultats(soc) {
           </div>`;
         }).join('')}
       </div>
+      ${deltaHtml}
     </div>`;
   };
 
   return `
-  ${renderBloc(assietteCour, '✅ Assiette courante (paiements confirmés)')}
+  ${renderBloc(assietteCour,  '✅ Assiette courante (paiements confirmés)',                     scenCour)}
   <div class="border-t border-slate-700 my-6"></div>
-  ${renderBloc(assietteInter, '⏳ Assiette à court terme (confirmés + prévus prochainement)')}
+  ${renderBloc(assietteInter, '⏳ Assiette à court terme (confirmés + prévus prochainement)',   scenInter, renderDelta(scenInter, scenCour, assietteInter, assietteCour))}
   <div class="border-t border-slate-700 my-6"></div>
-  ${renderBloc(assietteFin, `📅 Assiette prévisionnelle fin ${_bilanAnnee}`)}`;
+  ${renderBloc(assietteFin,   `📅 Assiette prévisionnelle fin ${_bilanAnnee}`,                  scenFin,   renderDelta(scenFin,   scenCour, assietteFin,   assietteCour))}`;
 }
 
 function renderSimuFiscale(soc) {
