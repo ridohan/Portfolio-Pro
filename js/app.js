@@ -36,6 +36,14 @@ function render() {
     STATE = { ...STATE_DEFAULTS, ...saved };
   }
 
+  // Migration one-shot : simulations IR stockées dans l'ancienne clé séparée
+  const _legacySimuls = (() => { try { return JSON.parse(localStorage.getItem('portfoliopro_simulations_ir')) || []; } catch { return []; } })();
+  if (_legacySimuls.length > 0 && (STATE.simulations_ir || []).length === 0) {
+    STATE.simulations_ir = _legacySimuls;
+    saveState();
+    localStorage.removeItem('portfoliopro_simulations_ir');
+  }
+
   const hash = location.hash || '#dashboard';
   const [route, id] = hash.slice(1).split('/');
 
@@ -535,6 +543,7 @@ function renderSocMissions(soc) {
           <div class="flex gap-2 shrink-0">
             <button onclick="openMissionModal('${soc.id}','${m.id}')" class="btn-secondary text-xs px-2 py-1">Modifier</button>
             <button onclick="archiveMission('${m.id}','${soc.id}')" class="btn-danger text-xs px-2 py-1">Archiver</button>
+            <button onclick="deleteMission('${m.id}','${soc.id}')" class="text-xs px-2 py-1 rounded-lg bg-transparent text-slate-600 hover:text-red-400 hover:bg-red-900/20 transition-colors" title="Supprimer définitivement">🗑</button>
           </div>
         </div>`;
       }).join('');
@@ -551,7 +560,10 @@ function renderSocMissions(soc) {
             <span class="text-slate-300 text-sm">${m.client}</span>
             <span class="text-slate-500 text-xs ml-2">TJM ${fmtE(m.tjm)}/j</span>
           </div>
-          <button onclick="unarchiveMission('${m.id}','${soc.id}')" class="btn-secondary text-xs px-2 py-1">Restaurer</button>
+          <div class="flex gap-2">
+            <button onclick="unarchiveMission('${m.id}','${soc.id}')" class="btn-secondary text-xs px-2 py-1">Restaurer</button>
+            <button onclick="deleteMission('${m.id}','${soc.id}')" class="text-xs px-2 py-1 rounded-lg bg-transparent text-slate-600 hover:text-red-400 hover:bg-red-900/20 transition-colors" title="Supprimer définitivement">🗑</button>
+          </div>
         </div>`).join('')}
       </div>
     </details>` : '';
@@ -907,6 +919,18 @@ function archiveMission(missionId, societeId) {
 function unarchiveMission(missionId, societeId) {
   const m = (STATE.missions || []).find(x => x.id === missionId);
   if (m) { m.actif = true; saveState(); }
+  renderSocieteDetail(document.getElementById('app'), societeId);
+}
+
+function deleteMission(missionId, societeId) {
+  const m = (STATE.missions || []).find(x => x.id === missionId);
+  if (!m) return;
+  const label = m.client ? `la mission "${m.client}"` : 'cette mission';
+  if (!confirm(`Supprimer définitivement ${label} ?\n\nToutes les données associées (CRA, paiements) seront effacées. Cette action est irréversible.`)) return;
+  STATE.missions    = (STATE.missions    || []).filter(x => x.id !== missionId);
+  STATE.cra_entries = (STATE.cra_entries || []).filter(x => x.mission_id !== missionId);
+  STATE.paiements   = (STATE.paiements   || []).filter(x => x.mission_id !== missionId);
+  saveState();
   renderSocieteDetail(document.getElementById('app'), societeId);
 }
 
@@ -2735,12 +2759,12 @@ const LS_SIMUL_KEY = 'portfoliopro_simulations_ir';
 let _currentSimId  = null; // ID de la simulation actuellement chargée (null = nouvelle)
 
 function lsGetSimulations() {
-  try { return JSON.parse(localStorage.getItem(LS_SIMUL_KEY)) || []; }
-  catch { return []; }
+  return STATE.simulations_ir || [];
 }
 
 function lsSaveSimulations(list) {
-  localStorage.setItem(LS_SIMUL_KEY, JSON.stringify(list));
+  STATE.simulations_ir = list;
+  saveState();
 }
 
 function _buildSimObject(id, nom) {
