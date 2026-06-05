@@ -563,7 +563,7 @@ function renderSocMissions(soc) {
 function renderSocCRA(soc) {
   const missions      = getMissionsActives(soc.id);
   const annee         = _craAnnee;
-  const moisLabels    = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
+  const moisLabels    = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
   const now           = new Date();
   const moisCourant   = now.getMonth() + 1;
   const anneeCourante = now.getFullYear();
@@ -574,103 +574,204 @@ function renderSocCRA(soc) {
       <button onclick="switchSocTab('missions','${soc.id}')" class="btn-secondary text-sm">Ajouter une mission</button>
     </div>`;
 
-  // helpers cellule
-  const cellLabel = (txt, cls = 'text-slate-400') =>
-    `<div class="text-xs ${cls} leading-5">${txt}</div>`;
-
-  // En-têtes mois
-  const theadMois = moisLabels.map((label, i) => {
-    const mois  = i + 1;
-    const isCur = annee === anneeCourante && mois === moisCourant;
-    return `<th class="text-center font-normal min-w-[110px] px-1 py-2 border-l border-slate-700 ${isCur ? 'bg-blue-900/20' : ''}">
-      <span class="text-xs font-semibold ${isCur ? 'text-blue-300' : 'text-slate-300'}">${label} ${annee}</span>
-    </th>`;
-  }).join('');
-
-  // Lignes missions
-  const tbodyRows = missions.map(m => {
-    const totaux = calcCRATotauxMission(m, annee);
-    const tvaDue = m.tva ? totaux.caTTC - totaux.caHT : 0;
-
-    const cells = moisLabels.map((_, i) => {
-      const mois  = i + 1;
-      const hors  = isMoisHorsMission(m, annee, mois);
-      const isCur = annee === anneeCourante && mois === moisCourant;
-      const jo    = calcJoursOuvres(annee, mois);
-
-      if (hors) return `<td class="border-l border-slate-700 px-2 py-1 ${isCur ? 'bg-blue-900/10' : 'bg-slate-900/30'}">
-        <div class="h-full opacity-20 text-center text-slate-500 text-xs pt-4">—</div>
-      </td>`;
-
+  // Pré-calcul de toutes les données (mission × mois)
+  const data = missions.map(m => ({
+    mission: m,
+    totaux:  calcCRATotauxMission(m, annee),
+    mois:    moisLabels.map((_, i) => {
+      const mois = i + 1;
+      const hors = isMoisHorsMission(m, annee, mois);
+      if (hors) return null;
       const entry = getCRAEntry(m.id, annee, mois);
       const c     = calcCRACell(m, annee, mois);
-      const hasAbsence = (entry.jours_absence || 0) > 0;
-      const bg = isCur ? 'bg-blue-900/10' : hasAbsence ? 'bg-amber-900/10' : '';
+      return { entry, c, mois };
+    }),
+  }));
 
-      const overrideLabel = c.joursOverride != null
-        ? `<span class="text-blue-400 cursor-pointer" onclick="overrideCRADispo('${m.id}',${annee},${mois},'${soc.id}')" title="Surcharge active — cliquer pour modifier">✏ ${c.joursOverride} j</span>`
-        : `<span class="text-slate-600 cursor-pointer hover:text-slate-400" onclick="overrideCRADispo('${m.id}',${annee},${mois},'${soc.id}')" title="Modifier jours disponibles">✏ ${jo} j</span>`;
-
-      return `<td class="border-l border-slate-700 px-2 py-1.5 ${bg} text-right">
-        <div class="text-xs text-slate-500 leading-5">${overrideLabel}</div>
-        <div class="flex items-center justify-end gap-1 leading-5">
-          <input type="number" min="0" max="${c.jousDispo}"
-            class="w-9 text-center bg-slate-700 border border-slate-600 rounded text-xs text-amber-300 py-0 focus:border-blue-500 outline-none"
-            value="${entry.jours_absence || ''}" placeholder="0"
-            onchange="saveCRAEntry('${m.id}',${annee},${mois},'jours_absence',parseFloat(this.value)||0,'${soc.id}')" />
-          <span class="text-slate-500 text-xs">abs</span>
-        </div>
-        <div class="text-xs font-semibold text-white leading-5">${c.jFact} j trav.</div>
-        <div class="text-xs text-slate-300 leading-5">${fmtE(c.caHT)} HT</div>
-        ${m.tva ? `<div class="text-xs text-slate-400 leading-5">${fmtE(c.caTTC)} TTC</div>` : ''}
-      </td>`;
-    }).join('');
-
-    return `<tr class="border-b border-slate-700/50">
-      <td class="px-3 py-2 align-top min-w-[160px]">
-        <div class="font-semibold text-white text-sm">${m.client}</div>
-        <div class="text-slate-500 text-xs">${fmtE(m.tjm)}/j${!m.tva ? ' · sans TVA' : ''}</div>
-        <div class="mt-2 text-xs text-slate-400 leading-5">${totaux.jours} j</div>
-        <div class="text-xs text-green-400 leading-5 font-medium">${fmtE(totaux.caHT)} HT</div>
-        ${m.tva ? `<div class="text-xs text-slate-400 leading-5">${fmtE(tvaDue)} TVA</div>
-        <div class="text-xs text-slate-300 leading-5">${fmtE(totaux.caTTC)} TTC</div>` : ''}
-      </td>
-      ${cells}
-      <td class="border-l border-slate-700 px-3 py-2 align-top text-right min-w-[110px]">
-        <div class="text-xs text-slate-400 leading-5">${totaux.jours} j</div>
-        <div class="text-xs font-bold text-green-400 leading-5">${fmtE(totaux.caHT)} HT</div>
-        ${m.tva ? `<div class="text-xs text-slate-400 leading-5">${fmtE(tvaDue)} TVA</div>
-        <div class="text-xs text-slate-300 leading-5">${fmtE(totaux.caTTC)} TTC</div>` : ''}
-      </td>
-    </tr>`;
-  }).join('');
-
-  // Ligne totaux mensuelle
-  const totauxAnnee = missions.reduce((acc, m) => {
-    const t = calcCRATotauxMission(m, annee);
-    acc.caHT += t.caHT; acc.caTTC += t.caTTC; acc.jours += t.jours;
-    return acc;
-  }, { caHT: 0, caTTC: 0, jours: 0 });
-  const tvaTotaleAnnee = totauxAnnee.caTTC - totauxAnnee.caHT;
-
-  const totauxMoisHtml = moisLabels.map((_, i) => {
-    const mois  = i + 1;
-    const isCur = annee === anneeCourante && mois === moisCourant;
-    // Recalculer avec TVA correcte par mission
+  // Totaux globaux par mois
+  const totMois = moisLabels.map((_, i) => {
+    const mois = i + 1;
     let caHT = 0, caTTC = 0, jours = 0;
     missions.forEach(m => {
       if (isMoisHorsMission(m, annee, mois)) return;
       const c = calcCRACell(m, annee, mois);
       caHT += c.caHT; caTTC += c.caTTC; jours += c.jFact;
     });
-    const tva = caTTC - caHT;
-    return `<td class="border-l border-slate-700 px-2 py-2 text-right ${isCur ? 'bg-blue-900/10' : 'bg-slate-800'}">
-      <div class="text-xs text-slate-400 leading-5">${jours} j</div>
-      <div class="text-xs font-bold text-green-400 leading-5">${fmtE(caHT)} HT</div>
-      ${tva > 0 ? `<div class="text-xs text-slate-400 leading-5">${fmtE(tva)} TVA</div>` : ''}
-      ${caTTC !== caHT ? `<div class="text-xs text-slate-300 leading-5">${fmtE(caTTC)} TTC</div>` : ''}
-    </td>`;
+    return { caHT, caTTC, jours, tva: caTTC - caHT };
+  });
+  const totAnnee = missions.reduce((acc, m) => {
+    const t = calcCRATotauxMission(m, annee);
+    acc.caHT += t.caHT; acc.caTTC += t.caTTC; acc.jours += t.jours;
+    return acc;
+  }, { caHT: 0, caTTC: 0, jours: 0 });
+  const tvaTotAnnee = totAnnee.caTTC - totAnnee.caHT;
+
+  // CSS partagés
+  const TH  = `px-3 py-2 text-center text-xs font-semibold border-r border-slate-700 whitespace-nowrap`;
+  const THL = `px-3 py-2 text-left   text-xs font-semibold border-r border-slate-700 sticky left-0 z-10`;
+  const TD  = (cur) => `px-3 py-2 text-center text-sm border-r border-slate-600 ${cur ? 'bg-blue-950/60' : ''}`;
+  const TDL = `px-3 py-2 text-left text-xs border-r border-slate-700 sticky left-0 z-10`;
+
+  // ── En-tête ──────────────────────────────────────────────────────────────────
+  const thead = `
+  <thead>
+    <tr class="bg-slate-700 border-b-2 border-slate-500">
+      <th class="${THL} bg-slate-700 min-w-[200px]">Mois</th>
+      ${moisLabels.map((label, i) => {
+        const mois  = i + 1;
+        const isCur = annee === anneeCourante && mois === moisCourant;
+        return `<th class="${TH} min-w-[110px] ${isCur ? 'bg-blue-900/60 text-blue-200' : 'bg-slate-700 text-slate-200'}">${label}</th>`;
+      }).join('')}
+      <th class="${TH} bg-slate-600 text-white min-w-[110px]">Total ${annee}</th>
+    </tr>
+  </thead>`;
+
+  // ── Corps : une section par mission ──────────────────────────────────────────
+  const buildRow = (label, labelCls, values, valueFn, rowCls = '') => `
+  <tr class="border-b border-slate-700/60 ${rowCls}">
+    <td class="${TDL} ${labelCls} font-medium">${label}</td>
+    ${values.map((v, i) => {
+      const isCur = annee === anneeCourante && (i + 1) === moisCourant;
+      const base  = `${TD(isCur)} align-middle`;
+      return `<td class="${base}">${v === null ? '<span class="text-slate-700">—</span>' : valueFn(v, i)}</td>`;
+    }).join('')}
+  </tr>`;
+
+  const tbody = data.map(({ mission: m, totaux, mois: moisData }) => {
+    const tvaDue = m.tva ? totaux.caTTC - totaux.caHT : 0;
+
+    // Ligne titre mission
+    const titleRow = `
+    <tr class="border-b border-slate-600 bg-slate-700/60">
+      <td colspan="${moisLabels.length + 2}"
+        class="px-3 py-2 text-sm font-bold text-white sticky left-0 bg-slate-700/60">
+        ${m.client}
+        <span class="ml-2 font-normal text-slate-400 text-xs">${fmtE(m.tjm)}/j${!m.tva ? ' · sans TVA' : ' · TVA 20%'}</span>
+      </td>
+    </tr>`;
+
+    // Ligne : Nombre de jours (auto ou override)
+    const rowJoursDispo = `
+    <tr class="border-b border-slate-700/40">
+      <td class="${TDL} bg-slate-800/60 text-slate-400">Nombre de jours</td>
+      ${moisData.map((d, i) => {
+        const isCur = annee === anneeCourante && (i + 1) === moisCourant;
+        if (d === null) return `<td class="${TD(isCur)} text-slate-700 bg-slate-900/20">—</td>`;
+        const hasOverride = d.c.joursOverride != null;
+        return `<td class="${TD(isCur)} bg-slate-800/40">
+          <span class="${hasOverride ? 'text-blue-300 cursor-pointer underline decoration-dotted' : 'text-slate-300 cursor-pointer hover:text-slate-100'}"
+            onclick="overrideCRADispo('${m.id}',${annee},${i+1},'${soc.id}')"
+            title="${hasOverride ? 'Surcharge active — cliquer pour modifier' : 'Cliquer pour personnaliser'}">
+            ${d.c.jousDispo}
+          </span>
+        </td>`;
+      }).join('')}
+      <td class="${TD(false)} bg-slate-800/40 font-semibold text-slate-300">${totaux.jours + moisData.filter(d=>d===null).reduce((a,_)=>a,0)}</td>
+    </tr>`;
+
+    // Ligne : Absences prévues
+    const rowAbsences = `
+    <tr class="border-b border-slate-700/40">
+      <td class="${TDL} bg-slate-800/60 text-slate-400">Absences prévues</td>
+      ${moisData.map((d, i) => {
+        const isCur = annee === anneeCourante && (i + 1) === moisCourant;
+        if (d === null) return `<td class="${TD(isCur)} bg-slate-900/20 text-slate-700">—</td>`;
+        const abs = d.entry.jours_absence || 0;
+        return `<td class="${TD(isCur)} bg-slate-800/40 ${abs > 0 ? 'bg-amber-900/20' : ''}">
+          <input type="number" min="0" max="${d.c.jousDispo}"
+            class="w-12 text-center bg-transparent border-b border-slate-600 text-sm
+                   ${abs > 0 ? 'text-amber-300 border-amber-600' : 'text-slate-400 hover:border-slate-400'}
+                   focus:outline-none focus:border-blue-400 py-0"
+            value="${abs || ''}" placeholder="0"
+            onchange="saveCRAEntry('${m.id}',${annee},${i+1},'jours_absence',parseFloat(this.value)||0,'${soc.id}')" />
+        </td>`;
+      }).join('')}
+      <td class="${TD(false)} bg-slate-800/40 text-slate-400">
+        ${moisData.reduce((s, d) => s + (d ? (d.entry.jours_absence || 0) : 0), 0) || '—'}
+      </td>
+    </tr>`;
+
+    // Ligne : Jours travaillés
+    const rowJoursTrav = `
+    <tr class="border-b border-slate-600">
+      <td class="${TDL} bg-slate-800 text-white font-semibold">Jours travaillés</td>
+      ${moisData.map((d, i) => {
+        const isCur = annee === anneeCourante && (i + 1) === moisCourant;
+        if (d === null) return `<td class="${TD(isCur)} bg-slate-900/30 text-slate-700">—</td>`;
+        return `<td class="${TD(isCur)} bg-slate-800 font-bold text-white">${d.c.jFact}</td>`;
+      }).join('')}
+      <td class="${TD(false)} bg-slate-800 font-bold text-white">${totaux.jours}</td>
+    </tr>`;
+
+    // Ligne : CA HT
+    const rowCaHT = `
+    <tr class="border-b border-slate-700/40">
+      <td class="${TDL} bg-slate-800/80 text-slate-300">CA HT</td>
+      ${moisData.map((d, i) => {
+        const isCur = annee === anneeCourante && (i + 1) === moisCourant;
+        if (d === null) return `<td class="${TD(isCur)} bg-slate-900/20 text-slate-700">—</td>`;
+        return `<td class="${TD(isCur)} bg-slate-800/60 text-slate-100">${fmtE(d.c.caHT)}</td>`;
+      }).join('')}
+      <td class="${TD(false)} bg-slate-800/60 font-semibold text-green-400">${fmtE(totaux.caHT)}</td>
+    </tr>`;
+
+    // Ligne : CA TTC (si TVA)
+    const rowCaTTC = !m.tva ? '' : `
+    <tr class="border-b border-slate-600">
+      <td class="${TDL} bg-slate-800/80 text-slate-300">CA TTC</td>
+      ${moisData.map((d, i) => {
+        const isCur = annee === anneeCourante && (i + 1) === moisCourant;
+        if (d === null) return `<td class="${TD(isCur)} bg-slate-900/20 text-slate-700">—</td>`;
+        return `<td class="${TD(isCur)} bg-slate-800/60 text-slate-300">${fmtE(d.c.caTTC)}</td>`;
+      }).join('')}
+      <td class="${TD(false)} bg-slate-800/60 font-semibold text-slate-300">${fmtE(totaux.caTTC)}</td>
+    </tr>`;
+
+    return titleRow + rowJoursDispo + rowAbsences + rowJoursTrav + rowCaHT + rowCaTTC;
   }).join('');
+
+  // ── Ligne totaux globaux ──────────────────────────────────────────────────────
+  const tfootJours = totMois.map((t, i) => {
+    const isCur = annee === anneeCourante && (i + 1) === moisCourant;
+    return `<td class="${TD(isCur)} bg-slate-700 font-bold text-white">${t.jours}</td>`;
+  }).join('');
+  const tfootHT = totMois.map((t, i) => {
+    const isCur = annee === anneeCourante && (i + 1) === moisCourant;
+    return `<td class="${TD(isCur)} bg-slate-700 font-bold text-green-400">${fmtE(t.caHT)}</td>`;
+  }).join('');
+  const tfootTVA = totMois.map((t, i) => {
+    const isCur = annee === anneeCourante && (i + 1) === moisCourant;
+    return `<td class="${TD(isCur)} bg-slate-700 text-slate-400">${t.tva > 0 ? fmtE(t.tva) : '—'}</td>`;
+  }).join('');
+  const tfootTTC = totMois.map((t, i) => {
+    const isCur = annee === anneeCourante && (i + 1) === moisCourant;
+    return `<td class="${TD(isCur)} bg-slate-700 text-slate-200">${t.caTTC !== t.caHT ? fmtE(t.caTTC) : '—'}</td>`;
+  }).join('');
+
+  const tfoot = `
+  <tfoot>
+    <tr class="border-t-2 border-slate-400 bg-slate-700">
+      <td class="${TDL} bg-slate-700 font-bold text-white text-sm" colspan="1">Total — Jours</td>
+      ${tfootJours}
+      <td class="${TD(false)} bg-slate-600 font-bold text-white">${totAnnee.jours}</td>
+    </tr>
+    <tr class="bg-slate-700 border-b border-slate-600">
+      <td class="${TDL} bg-slate-700 font-bold text-white text-sm">Total — CA HT</td>
+      ${tfootHT}
+      <td class="${TD(false)} bg-slate-600 font-bold text-green-400">${fmtE(totAnnee.caHT)}</td>
+    </tr>
+    ${tvaTotAnnee > 0 ? `
+    <tr class="bg-slate-700 border-b border-slate-600">
+      <td class="${TDL} bg-slate-700 text-slate-300 text-sm">Total — TVA collectée</td>
+      ${tfootTVA}
+      <td class="${TD(false)} bg-slate-600 text-slate-300">${fmtE(tvaTotAnnee)}</td>
+    </tr>
+    <tr class="bg-slate-700">
+      <td class="${TDL} bg-slate-700 text-slate-200 font-semibold text-sm">Total — CA TTC</td>
+      ${tfootTTC}
+      <td class="${TD(false)} bg-slate-600 font-semibold text-slate-200">${fmtE(totAnnee.caTTC)}</td>
+    </tr>` : ''}
+  </tfoot>`;
 
   return `
   <div class="flex items-center justify-between mb-4">
@@ -680,36 +781,19 @@ function renderSocCRA(soc) {
       <button onclick="setCRAYear(1,'${soc.id}')" class="btn-secondary text-sm px-3 py-1">→</button>
     </div>
     <div class="text-right">
-      <div class="text-slate-400 text-xs">CA annuel prévisionnel</div>
-      <div class="text-green-400 font-bold text-lg">${fmtE(totauxAnnee.caHT)} HT</div>
-      ${tvaTotaleAnnee > 0 ? `<div class="text-slate-400 text-xs">${fmtE(tvaTotaleAnnee)} TVA · ${fmtE(totauxAnnee.caTTC)} TTC</div>` : ''}
+      <div class="text-slate-500 text-xs uppercase tracking-wide mb-1">CA prévisionnel ${annee}</div>
+      <div class="text-green-400 font-bold text-2xl">${fmtE(totAnnee.caHT)} <span class="text-sm font-normal text-slate-400">HT</span></div>
+      ${tvaTotAnnee > 0 ? `<div class="text-slate-400 text-xs mt-0.5">${fmtE(tvaTotAnnee)} TVA &nbsp;·&nbsp; ${fmtE(totAnnee.caTTC)} TTC</div>` : ''}
     </div>
   </div>
-  <div class="overflow-x-auto rounded-xl border border-slate-700">
-    <table class="w-full text-sm border-collapse" style="min-width:1300px">
-      <thead class="border-b-2 border-slate-600 bg-slate-800">
-        <tr>
-          <th class="text-left text-slate-400 font-medium text-xs py-2 px-3 min-w-[160px]">Mission</th>
-          ${theadMois}
-          <th class="text-right text-slate-400 font-medium text-xs py-2 px-3 border-l border-slate-700 min-w-[110px]">Total</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${tbodyRows}
-        <tr class="border-t-2 border-slate-500 bg-slate-800/80">
-          <td class="px-3 py-2 text-xs font-bold text-slate-300">TOTAUX</td>
-          ${totauxMoisHtml}
-          <td class="border-l border-slate-700 px-3 py-2 text-right">
-            <div class="text-xs text-slate-400 leading-5">${totauxAnnee.jours} j</div>
-            <div class="text-xs font-bold text-green-400 leading-5">${fmtE(totauxAnnee.caHT)} HT</div>
-            ${tvaTotaleAnnee > 0 ? `<div class="text-xs text-slate-400 leading-5">${fmtE(tvaTotaleAnnee)} TVA</div>
-            <div class="text-xs text-slate-300 leading-5">${fmtE(totauxAnnee.caTTC)} TTC</div>` : ''}
-          </td>
-        </tr>
-      </tbody>
+  <div class="overflow-x-auto rounded-xl border border-slate-600 shadow-xl">
+    <table class="w-full text-sm border-collapse" style="min-width:${200 + moisLabels.length * 110 + 110}px">
+      ${thead}
+      <tbody>${tbody}</tbody>
+      ${tfoot}
     </table>
   </div>
-  <p class="text-slate-600 text-xs mt-2">Mois courant en bleu · absences en orange · ✏ = modifier jours disponibles</p>`;
+  <p class="text-slate-600 text-xs mt-2">Mois courant surligné en bleu · nombre de jours cliquable pour personnaliser · absences saisies en orange</p>`;
 }
 
 // ─── MISSIONS — CRUD ─────────────────────────────────────────────────────────
