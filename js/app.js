@@ -153,14 +153,12 @@ function _updateAutoSaveIndicator(status) {
     off:     { dot: 'hidden', text: '', title: '' },
   }[status] || { dot: 'hidden', text: '', title: '' };
   el.innerHTML = status === 'off' ? '' : `
-    <button onclick="status==='pending'?reauthorizeAutoSave():openSettings()"
+    <button onclick="${status === 'pending' ? 'reauthorizeAutoSave()' : 'openSettings()'}"
       class="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors"
       title="${cfg.title}">
       <span class="w-1.5 h-1.5 rounded-full ${cfg.dot}"></span>
       <span>${cfg.text}</span>
     </button>`;
-  // stocker le status pour le bouton pending
-  el.dataset.status = status;
 }
 
 function _refreshAutoSaveSettings() {
