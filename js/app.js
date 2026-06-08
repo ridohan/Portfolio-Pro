@@ -1208,14 +1208,41 @@ function calcDepenseMois(dep, annee, mois) {
     if (annee === dep.mois_fin.annee && mois > dep.mois_fin.mois) return 0;
   }
   const startMois = dep.mois_debut?.mois || 1;
+  // Pour les salaires : coût société = rémunération + cotisations (TNS ou patronales)
+  const montant = dep.categorie === 'salaire' ? _salaireCoutSociete(dep) : dep.montant_ht;
   switch (dep.periodicite) {
-    case 'mensuelle':      return dep.montant_ht;
-    case 'trimestrielle':  return ((mois - startMois + 12) % 3  === 0) ? dep.montant_ht : 0;
-    case 'semestrielle':   return ((mois - startMois + 12) % 6  === 0) ? dep.montant_ht : 0;
-    case 'annuelle':       return mois === startMois             ? dep.montant_ht : 0;
+    case 'mensuelle':      return montant;
+    case 'trimestrielle':  return ((mois - startMois + 12) % 3  === 0) ? montant : 0;
+    case 'semestrielle':   return ((mois - startMois + 12) % 6  === 0) ? montant : 0;
+    case 'annuelle':       return mois === startMois             ? montant : 0;
     case 'ponctuelle':
       return (dep.mois_debut && dep.mois_debut.annee === annee && dep.mois_debut.mois === mois)
-        ? dep.montant_ht : 0;
+        ? montant : 0;
+    default: return 0;
+  }
+}
+
+// Retourne le salaire net perçu pour un mois donné
+function calcSalaireNetMois(dep, annee, mois) {
+  if (dep.categorie !== 'salaire') return 0;
+  const net = _salaireNetMensuel(dep);
+  // Réutilise la même logique de périodicité mais sur le net
+  if (dep.mois_debut) {
+    if (annee < dep.mois_debut.annee) return 0;
+    if (annee === dep.mois_debut.annee && mois < dep.mois_debut.mois) return 0;
+  }
+  if (dep.mois_fin) {
+    if (annee > dep.mois_fin.annee) return 0;
+    if (annee === dep.mois_fin.annee && mois > dep.mois_fin.mois) return 0;
+  }
+  const startMois = dep.mois_debut?.mois || 1;
+  switch (dep.periodicite) {
+    case 'mensuelle':     return net;
+    case 'trimestrielle': return ((mois - startMois + 12) % 3 === 0) ? net : 0;
+    case 'semestrielle':  return ((mois - startMois + 12) % 6 === 0) ? net : 0;
+    case 'annuelle':      return mois === startMois ? net : 0;
+    case 'ponctuelle':
+      return (dep.mois_debut && dep.mois_debut.annee === annee && dep.mois_debut.mois === mois) ? net : 0;
     default: return 0;
   }
 }
@@ -1302,6 +1329,7 @@ function calcDepensesAnnee(societeId, annee) {
 // ─── BILAN — RENDU ───────────────────────────────────────────────────────────
 
 const CATS_DEPENSE = [
+  { value: 'salaire',    label: '👤 Salaire dirigeant / salarié' },
   { value: 'loyer',      label: 'Loyer & charges locatives' },
   { value: 'logiciel',   label: 'Logiciels & abonnements' },
   { value: 'materiel',   label: 'Matériel & équipement' },
@@ -1311,6 +1339,34 @@ const CATS_DEPENSE = [
   { value: 'soustraitance', label: 'Sous-traitance' },
   { value: 'autre',      label: 'Autre' },
 ];
+
+// Taux par défaut selon régime social (2024-2025)
+const SALAIRE_DEFAULTS = {
+  // TNS — gérant majoritaire EURL/SARL (cotisations URSSAF sur rémunération nette)
+  tns: {
+    taux_cotis: 0.45,  // ~45 % de la rémunération nette (maladie, retraite, AF, CSG/CRDS, formation)
+  },
+  // Assimilé-salarié — dirigeant SASU/SAS (régime général)
+  assimile_salarie: {
+    taux_patronal: 0.45,  // ~45 % du brut
+    taux_salarial: 0.22,  // ~22 % du brut → net ≈ brut × 0.78
+  },
+};
+
+// Helpers calcul salaire
+function _salaireNetMensuel(dep) {
+  if (!dep.regime_social || dep.regime_social === 'tns') {
+    return dep.montant_ht; // TNS : montant_ht = rémunération nette
+  }
+  // Assimilé-salarié : montant_ht = brut, net = brut × (1 - taux_salarial)
+  return Math.round(dep.montant_ht * (1 - (dep.taux_salarial ?? SALAIRE_DEFAULTS.assimile_salarie.taux_salarial)));
+}
+function _salaireCoutSociete(dep) {
+  if (!dep.regime_social || dep.regime_social === 'tns') {
+    return Math.round(dep.montant_ht * (1 + (dep.taux_cotis ?? SALAIRE_DEFAULTS.tns.taux_cotis)));
+  }
+  return Math.round(dep.montant_ht * (1 + (dep.taux_patronal ?? SALAIRE_DEFAULTS.assimile_salarie.taux_patronal)));
+}
 const CAT_LABEL = Object.fromEntries(CATS_DEPENSE.map(c => [c.value, c.label]));
 
 function renderSocBilan(soc) {
@@ -1433,17 +1489,31 @@ function renderSocBilan(soc) {
   const depRows = depenses.length === 0
     ? `<tr><td colspan="14" class="px-3 py-4 text-center text-slate-600 text-xs italic">Aucune dépense — cliquez sur "+ Ajouter une dépense"</td></tr>`
     : depenses.map(dep => {
+        const isSal = dep.categorie === 'salaire';
         const cells = moisData.map(md => {
           const isCur = annee === anneeCourante && md.mois === moisCourant;
-          const ht = calcDepenseMois(dep, annee, md.mois);
-          return `<td class="${TD(isCur, 'bg-slate-800/20')}">${ht > 0 ? `<span class="text-red-300">${fmtE(ht)}</span>` : '<span class="text-slate-800">—</span>'}</td>`;
+          const ht  = calcDepenseMois(dep, annee, md.mois);
+          const net = isSal ? calcSalaireNetMois(dep, annee, md.mois) : 0;
+          if (!ht) return `<td class="${TD(isCur, 'bg-slate-800/20')}"><span class="text-slate-800">—</span></td>`;
+          return `<td class="${TD(isCur, 'bg-slate-800/20')}">
+            <div class="flex flex-col items-center gap-0">
+              <span class="text-red-300">${fmtE(ht)}</span>
+              ${isSal ? `<span class="text-emerald-700 text-xs">net ${fmtE(net)}</span>` : ''}
+            </div>
+          </td>`;
         }).join('');
-        let totD = 0;
-        for (let m = 1; m <= 12; m++) totD += calcDepenseMois(dep, annee, m);
+        let totD = 0, totNet = 0;
+        for (let m = 1; m <= 12; m++) {
+          totD   += calcDepenseMois(dep, annee, m);
+          totNet += isSal ? calcSalaireNetMois(dep, annee, m) : 0;
+        }
+        const labelSuffix = isSal
+          ? ` <span class="text-slate-600 text-xs">(brut + charges pat.)</span>`
+          : '';
         return `<tr class="border-b border-slate-700/30 group">
           <td class="${TDL} bg-slate-800/20">
             <div class="flex items-center justify-between">
-              <span class="text-slate-400">${dep.label} <span class="text-slate-700">${_perioLabel(dep.periodicite)}</span></span>
+              <span class="text-slate-400">${dep.label}${labelSuffix} <span class="text-slate-700">${_perioLabel(dep.periodicite)}</span></span>
               <div class="hidden group-hover:flex gap-1 ml-2 shrink-0">
                 <button onclick="openDepenseModal('${soc.id}','${dep.id}')" class="text-slate-500 hover:text-white text-xs">✏</button>
                 <button onclick="deleteDepense('${dep.id}','${soc.id}')" class="text-red-800 hover:text-red-400 text-xs ml-1">✕</button>
@@ -1451,7 +1521,12 @@ function renderSocBilan(soc) {
             </div>
           </td>
           ${cells}
-          <td class="${COL_TOTAL} bg-slate-700/30 text-red-300">${totD > 0 ? fmtE(totD) : '—'}</td>
+          <td class="${COL_TOTAL} bg-slate-700/30">
+            <div class="flex flex-col items-center gap-0">
+              <span class="text-red-300">${totD > 0 ? fmtE(totD) : '—'}</span>
+              ${isSal && totNet > 0 ? `<span class="text-emerald-700 text-xs">net ${fmtE(totNet)}</span>` : ''}
+            </div>
+          </td>
         </tr>`;
       }).join('');
 
@@ -1559,8 +1634,142 @@ function renderSocBilan(soc) {
       </tbody>
     </table>
   </div>
+  ${renderRemunerations(soc, annee)}
   ${renderSimuFiscale(soc)}
   ${renderSimuFiscaleIS(soc)}`;
+}
+
+function renderRemunerations(soc, annee) {
+  const salDeps = getDepenses(soc.id).filter(d => d.categorie === 'salaire');
+  if (salDeps.length === 0) return '';
+
+  const moisLabels = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
+  const now = new Date();
+  const moisCourant   = now.getMonth() + 1;
+  const anneeCourante = now.getFullYear();
+
+  // Totaux annuels par ligne de salaire
+  const lignes = salDeps.map(dep => {
+    let totBrut = 0, totPat = 0, totSal = 0, totNet = 0, totCout = 0;
+    const pat = dep.taux_patronal ?? SALAIRE_DEFAULTS.taux_patronal;
+    const sal = dep.taux_salarial ?? SALAIRE_DEFAULTS.taux_salarial;
+    for (let m = 1; m <= 12; m++) {
+      const brut = (() => {
+        // Récupère le brut mensuel selon périodicité (sans multiplicateur charges)
+        if (dep.mois_debut) {
+          if (annee < dep.mois_debut.annee || (annee === dep.mois_debut.annee && m < dep.mois_debut.mois)) return 0;
+        }
+        if (dep.mois_fin) {
+          if (annee > dep.mois_fin.annee || (annee === dep.mois_fin.annee && m > dep.mois_fin.mois)) return 0;
+        }
+        const startMois = dep.mois_debut?.mois || 1;
+        switch (dep.periodicite) {
+          case 'mensuelle':     return dep.montant_ht;
+          case 'trimestrielle': return ((m - startMois + 12) % 3 === 0) ? dep.montant_ht : 0;
+          case 'semestrielle':  return ((m - startMois + 12) % 6 === 0) ? dep.montant_ht : 0;
+          case 'annuelle':      return m === startMois ? dep.montant_ht : 0;
+          case 'ponctuelle':    return (dep.mois_debut?.annee === annee && dep.mois_debut?.mois === m) ? dep.montant_ht : 0;
+          default: return 0;
+        }
+      })();
+      totBrut += brut;
+      totPat  += Math.round(brut * pat);
+      totSal  += Math.round(brut * sal);
+      totNet  += Math.round(brut * (1 - sal));
+      totCout += Math.round(brut * (1 + pat));
+    }
+    return { dep, totBrut, totPat, totSal, totNet, totCout };
+  });
+
+  const grandTotBrut = lignes.reduce((s, l) => s + l.totBrut, 0);
+  const grandTotPat  = lignes.reduce((s, l) => s + l.totPat,  0);
+  const grandTotNet  = lignes.reduce((s, l) => s + l.totNet,  0);
+  const grandTotCout = lignes.reduce((s, l) => s + l.totCout, 0);
+
+  // Tableau mensuel net perçu
+  const TH2  = (cur) => `px-2 py-2 text-center text-xs font-semibold border-r border-slate-700 ${cur ? 'bg-blue-900/40 text-blue-200' : 'bg-slate-700 text-slate-200'}`;
+  const TD2  = (cur) => `px-2 py-1.5 text-center text-xs border-r border-slate-600 ${cur ? 'bg-blue-950/30' : ''}`;
+  const TDL2 = `px-3 py-2 text-left text-xs border-r border-slate-700 sticky left-0 z-10 min-w-[180px]`;
+
+  const salRows = salDeps.map(dep => {
+    const pat = dep.taux_patronal ?? SALAIRE_DEFAULTS.taux_patronal;
+    const sal = dep.taux_salarial ?? SALAIRE_DEFAULTS.taux_salarial;
+    const cells = Array.from({ length: 12 }, (_, i) => {
+      const m   = i + 1;
+      const net = calcSalaireNetMois(dep, annee, m);
+      const cur = annee === anneeCourante && m === moisCourant;
+      return `<td class="${TD2(cur)} bg-emerald-950/10">${net > 0 ? `<span class="text-emerald-400">${fmtE(net)}</span>` : '<span class="text-slate-800">—</span>'}</td>`;
+    }).join('');
+    let totNet = 0;
+    for (let m = 1; m <= 12; m++) totNet += calcSalaireNetMois(dep, annee, m);
+    return `<tr class="border-b border-slate-700/30">
+      <td class="${TDL2} bg-emerald-950/10">
+        <span class="text-slate-300">${dep.label}</span>
+        <span class="text-slate-600 text-xs ml-1">(${(sal*100).toFixed(0)}% ch. sal.)</span>
+      </td>
+      ${cells}
+      <td class="px-3 py-2 text-center text-xs font-bold border-r border-slate-500 bg-emerald-900/30 text-emerald-300">${totNet > 0 ? fmtE(totNet) : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  return `
+  <div class="mt-6 pt-6 border-t border-slate-700">
+    <h3 class="text-white font-semibold mb-1">👤 Rémunérations</h3>
+    <p class="text-slate-500 text-xs mb-4">Synthèse des salaires saisis en dépenses · le coût total société inclut les charges patronales</p>
+
+    <!-- KPIs rémunération -->
+    <div class="grid grid-cols-4 gap-3 mb-5">
+      <div class="bg-slate-800 rounded-xl border border-slate-700 p-3">
+        <div class="text-slate-500 text-xs mb-1">Coût total société</div>
+        <div class="text-red-300 font-bold text-lg">${fmtE(grandTotCout)}</div>
+        <div class="text-slate-600 text-xs mt-0.5">brut + ch. patronales / an</div>
+      </div>
+      <div class="bg-slate-800 rounded-xl border border-slate-700 p-3">
+        <div class="text-slate-500 text-xs mb-1">Salaire brut annuel</div>
+        <div class="text-slate-300 font-bold text-lg">${fmtE(grandTotBrut)}</div>
+        <div class="text-slate-600 text-xs mt-0.5">avant charges salariales</div>
+      </div>
+      <div class="bg-slate-800 rounded-xl border border-slate-700 p-3">
+        <div class="text-slate-500 text-xs mb-1">Charges patronales</div>
+        <div class="text-red-400 font-bold text-lg">${fmtE(grandTotPat)}</div>
+        <div class="text-slate-600 text-xs mt-0.5">à la charge de la société</div>
+      </div>
+      <div class="bg-slate-800 rounded-xl border border-emerald-800/40 p-3 bg-emerald-950/20">
+        <div class="text-slate-500 text-xs mb-1">Net perçu annuel</div>
+        <div class="text-emerald-400 font-bold text-lg">${fmtE(grandTotNet)}</div>
+        <div class="text-slate-600 text-xs mt-0.5">après charges salariales</div>
+      </div>
+    </div>
+
+    <!-- Tableau mensuel net perçu -->
+    <div class="overflow-x-auto rounded-xl border border-slate-600 mb-4">
+      <table class="w-full text-sm border-collapse" style="min-width:${180 + 12*100 + 105}px">
+        <thead>
+          <tr class="border-b-2 border-slate-500">
+            <th class="${TDL2} bg-slate-700 text-slate-400 font-medium text-xs">Net mensuel perçu</th>
+            ${moisLabels.map((l, i) => `<th class="${TH2(annee === anneeCourante && i+1 === moisCourant)}">${l}</th>`).join('')}
+            <th class="px-3 py-2 text-center text-xs font-bold border-r border-slate-500 bg-slate-600 text-white min-w-[105px]">Total ${annee}</th>
+          </tr>
+        </thead>
+        <tbody>${salRows}</tbody>
+      </table>
+    </div>
+
+    <!-- Détail par ligne de salaire -->
+    ${lignes.length > 1 ? `
+    <div class="space-y-2">
+      ${lignes.map(l => `
+      <div class="flex items-center justify-between bg-slate-800/40 border border-slate-700/60 rounded-lg px-4 py-2 text-xs">
+        <span class="text-slate-300 font-medium">${l.dep.label}</span>
+        <div class="flex gap-6">
+          <span class="text-slate-500">Brut/mois <span class="text-slate-300">${fmtE(l.dep.montant_ht)}</span></span>
+          <span class="text-slate-500">Ch. pat. <span class="text-red-400">${fmtE(Math.round(l.dep.montant_ht * (l.dep.taux_patronal ?? SALAIRE_DEFAULTS.taux_patronal)))}</span></span>
+          <span class="text-slate-500">Net/mois <span class="text-emerald-400 font-semibold">${fmtE(Math.round(l.dep.montant_ht * (1 - (l.dep.taux_salarial ?? SALAIRE_DEFAULTS.taux_salarial))))}</span></span>
+          <span class="text-slate-500">Coût soc. <span class="text-red-300">${fmtE(Math.round(l.dep.montant_ht * (1 + (l.dep.taux_patronal ?? SALAIRE_DEFAULTS.taux_patronal))))}</span></span>
+        </div>
+      </div>`).join('')}
+    </div>` : ''}
+  </div>`;
 }
 
 function _perioLabel(p) {
@@ -2235,35 +2444,117 @@ function openDepenseModal(societeId, depenseId) {
     ['semestrielle','Semestrielle'],['annuelle','Annuelle'],['ponctuelle','Ponctuelle (1 fois)'],
   ].map(([val, lbl]) => `<option value="${val}" ${v.periodicite === val ? 'selected' : ''}>${lbl}</option>`).join('');
 
+  const isSalaire  = v.categorie === 'salaire';
+  const regime     = v.regime_social || 'tns';
+  const isTNS      = regime === 'tns';
+  const montantVal = v.montant_ht || '';
+
   document.body.insertAdjacentHTML('beforeend', `
   <div id="dep-modal" class="modal-backdrop" onclick="if(event.target===this)closeDepenseModal()">
     <div class="modal-box">
       <h3 class="text-base font-semibold text-white mb-4">${dep ? 'Modifier' : 'Nouvelle'} dépense</h3>
       <div class="space-y-3">
         <div>
+          <label class="label">Catégorie</label>
+          <select id="dep-cat" class="input" onchange="_onDepCatChange()">${catsOptions}</select>
+        </div>
+        <div>
           <label class="label">Libellé *</label>
           <input id="dep-label" class="input" value="${v.label}" placeholder="Ex : Loyer bureau, Abonnement Notion…" />
         </div>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="label">Montant HT (€) *</label>
-            <input id="dep-montant" class="input" type="number" min="0" step="0.01" value="${v.montant_ht || ''}" placeholder="0" />
-          </div>
-          <div>
-            <label class="label">TVA applicable</label>
-            <div class="flex gap-2 mt-1">
-              <button id="dep-tva-oui" onclick="document.getElementById('dep-tva-val').value='0.20';document.getElementById('dep-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('dep-tva-non').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
-                class="flex-1 text-xs py-1.5 rounded ${v.tva_taux > 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">20%</button>
-              <button id="dep-tva-non" onclick="document.getElementById('dep-tva-val').value='0';document.getElementById('dep-tva-non').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('dep-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
-                class="flex-1 text-xs py-1.5 rounded ${v.tva_taux === 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">Non</button>
+
+        <!-- Champs standard (masqués si salaire) -->
+        <div id="dep-std-fields" class="${isSalaire ? 'hidden' : ''}">
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="label">Montant HT (€) *</label>
+              <input id="dep-montant" class="input" type="number" min="0" step="0.01" value="${!isSalaire ? montantVal : ''}" placeholder="0" />
             </div>
-            <input type="hidden" id="dep-tva-val" value="${v.tva_taux}" />
+            <div>
+              <label class="label">TVA applicable</label>
+              <div class="flex gap-2 mt-1">
+                <button id="dep-tva-oui" onclick="document.getElementById('dep-tva-val').value='0.20';document.getElementById('dep-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('dep-tva-non').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
+                  class="flex-1 text-xs py-1.5 rounded ${v.tva_taux > 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">20%</button>
+                <button id="dep-tva-non" onclick="document.getElementById('dep-tva-val').value='0';document.getElementById('dep-tva-non').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('dep-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
+                  class="flex-1 text-xs py-1.5 rounded ${v.tva_taux === 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">Non</button>
+              </div>
+              <input type="hidden" id="dep-tva-val" value="${v.tva_taux}" />
+            </div>
           </div>
         </div>
-        <div>
-          <label class="label">Catégorie</label>
-          <select id="dep-cat" class="input">${catsOptions}</select>
+
+        <!-- Champs salaire -->
+        <div id="dep-salaire-fields" class="${isSalaire ? '' : 'hidden'}">
+
+          <!-- Régime social -->
+          <div class="mb-2">
+            <label class="label">Régime social</label>
+            <div class="flex gap-2">
+              <button id="sal-btn-tns" onclick="_setSalaireRegime('tns')"
+                class="flex-1 text-xs py-2 px-3 rounded-lg border transition-colors ${isTNS ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-400 hover:bg-slate-600'}">
+                <div class="font-medium">TNS</div>
+                <div class="opacity-70 mt-0.5">EURL / SARL gérant maj.</div>
+              </button>
+              <button id="sal-btn-as" onclick="_setSalaireRegime('assimile_salarie')"
+                class="flex-1 text-xs py-2 px-3 rounded-lg border transition-colors ${!isTNS ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-400 hover:bg-slate-600'}">
+                <div class="font-medium">Assimilé-salarié</div>
+                <div class="opacity-70 mt-0.5">SASU / SAS dirigeant</div>
+              </button>
+            </div>
+            <input type="hidden" id="sal-regime" value="${regime}" />
+          </div>
+
+          <!-- Saisie montant + mode -->
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="label" id="sal-montant-label">${isTNS ? 'Rémunération nette mensuelle (€)' : 'Salaire brut mensuel (€)'} *</label>
+              <input id="dep-salaire-montant" class="input" type="number" min="0" step="10"
+                value="${isSalaire ? montantVal : ''}" placeholder="0"
+                oninput="_updateSalairePreview()" />
+            </div>
+            <div id="sal-mode-wrap" class="${isTNS ? 'hidden' : ''}">
+              <label class="label">Je saisis en</label>
+              <div class="flex gap-2 mt-1">
+                <button id="sal-mode-brut" onclick="_setSalaireMode('brut')"
+                  class="flex-1 text-xs py-1.5 rounded ${(v.salaire_mode || 'brut') === 'brut' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">Brut</button>
+                <button id="sal-mode-net" onclick="_setSalaireMode('net')"
+                  class="flex-1 text-xs py-1.5 rounded ${v.salaire_mode === 'net' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">Net</button>
+              </div>
+              <input type="hidden" id="sal-mode" value="${v.salaire_mode || 'brut'}" />
+            </div>
+          </div>
+
+          <!-- Taux -->
+          <div id="sal-taux-tns" class="mt-2 ${isTNS ? '' : 'hidden'}">
+            <label class="label">Taux cotisations TNS (%)</label>
+            <input id="dep-taux-cotis" class="input" type="number" min="0" max="100" step="1"
+              value="${((v.taux_cotis ?? SALAIRE_DEFAULTS.tns.taux_cotis) * 100).toFixed(0)}"
+              oninput="_updateSalairePreview()" />
+            <p class="text-slate-600 text-xs mt-1">Taux appliqué sur la rémunération nette · défaut URSSAF ~45 % (maladie, retraite, AF, CSG/CRDS, formation)</p>
+          </div>
+          <div id="sal-taux-as" class="grid grid-cols-2 gap-3 mt-2 ${isTNS ? 'hidden' : ''}">
+            <div>
+              <label class="label">Charges patronales (%)</label>
+              <input id="dep-taux-pat" class="input" type="number" min="0" max="100" step="1"
+                value="${((v.taux_patronal ?? SALAIRE_DEFAULTS.assimile_salarie.taux_patronal) * 100).toFixed(0)}"
+                oninput="_updateSalairePreview()" />
+              <p class="text-slate-600 text-xs mt-1">Défaut SASU ~45 % du brut</p>
+            </div>
+            <div>
+              <label class="label">Charges salariales (%)</label>
+              <input id="dep-taux-sal" class="input" type="number" min="0" max="100" step="1"
+                value="${((v.taux_salarial ?? SALAIRE_DEFAULTS.assimile_salarie.taux_salarial) * 100).toFixed(0)}"
+                oninput="_updateSalairePreview()" />
+              <p class="text-slate-600 text-xs mt-1">Défaut SASU ~22 % du brut</p>
+            </div>
+          </div>
+
+          <!-- Preview -->
+          <div id="dep-salaire-preview" class="mt-3 p-3 bg-slate-700/40 rounded-lg text-xs space-y-1.5"></div>
+          <input type="hidden" id="dep-montant" value="${isSalaire ? montantVal : ''}" />
+          <input type="hidden" id="dep-tva-val" value="0" />
         </div>
+
         <div>
           <label class="label">Périodicité</label>
           <select id="dep-perio" class="input">${periodOptions}</select>
@@ -2285,6 +2576,79 @@ function openDepenseModal(societeId, depenseId) {
       </div>
     </div>
   </div>`);
+  if (isSalaire) _updateSalairePreview();
+}
+
+function _onDepCatChange() {
+  const isSal = document.getElementById('dep-cat').value === 'salaire';
+  document.getElementById('dep-std-fields').classList.toggle('hidden', isSal);
+  document.getElementById('dep-salaire-fields').classList.toggle('hidden', !isSal);
+  if (isSal) { _setSalaireRegime(document.getElementById('sal-regime')?.value || 'tns'); _updateSalairePreview(); }
+}
+
+function _setSalaireRegime(regime) {
+  document.getElementById('sal-regime').value = regime;
+  const isTNS = regime === 'tns';
+  document.getElementById('sal-btn-tns').className = `flex-1 text-xs py-2 px-3 rounded-lg border transition-colors ${isTNS ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-400 hover:bg-slate-600'}`;
+  document.getElementById('sal-btn-as').className  = `flex-1 text-xs py-2 px-3 rounded-lg border transition-colors ${!isTNS ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-400 hover:bg-slate-600'}`;
+  document.getElementById('sal-taux-tns').classList.toggle('hidden', !isTNS);
+  document.getElementById('sal-taux-as').classList.toggle('hidden', isTNS);
+  document.getElementById('sal-mode-wrap').classList.toggle('hidden', isTNS);
+  document.getElementById('sal-montant-label').textContent = (isTNS ? 'Rémunération nette mensuelle (€)' : 'Salaire mensuel (€)') + ' *';
+  _updateSalairePreview();
+}
+
+function _setSalaireMode(mode) {
+  document.getElementById('sal-mode').value = mode;
+  document.getElementById('sal-mode-brut').className = `flex-1 text-xs py-1.5 rounded ${mode === 'brut' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`;
+  document.getElementById('sal-mode-net').className  = `flex-1 text-xs py-1.5 rounded ${mode === 'net'  ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`;
+  _updateSalairePreview();
+}
+
+function _updateSalairePreview() {
+  const regime = document.getElementById('sal-regime')?.value || 'tns';
+  const isTNS  = regime === 'tns';
+  const saisi  = parseFloat(document.getElementById('dep-salaire-montant')?.value) || 0;
+  const mode   = document.getElementById('sal-mode')?.value || 'brut';
+
+  let brut, net, cout, cotisLabel, cotisVal;
+
+  if (isTNS) {
+    const taux = (parseFloat(document.getElementById('dep-taux-cotis')?.value) || 45) / 100;
+    net  = saisi;  // TNS : on saisit toujours le net (rémunération)
+    brut = net;    // pas de notion de brut/net différents pour TNS
+    cout = Math.round(net * (1 + taux));
+    cotisLabel = 'Cotisations TNS (URSSAF)';
+    cotisVal   = cout - net;
+    document.getElementById('dep-montant').value = net;
+  } else {
+    const pat = (parseFloat(document.getElementById('dep-taux-pat')?.value) || 45) / 100;
+    const sal = (parseFloat(document.getElementById('dep-taux-sal')?.value) || 22) / 100;
+    if (mode === 'net') {
+      net  = saisi;
+      brut = sal > 0 ? Math.round(net / (1 - sal)) : net; // back-calcul brut depuis net
+    } else {
+      brut = saisi;
+      net  = Math.round(brut * (1 - sal));
+    }
+    cout = Math.round(brut * (1 + pat));
+    cotisLabel = 'Charges patronales';
+    cotisVal   = cout - brut;
+    document.getElementById('dep-montant').value = brut; // on stocke toujours le brut
+  }
+
+  const prev = document.getElementById('dep-salaire-preview');
+  if (!prev) return;
+  prev.innerHTML = isTNS ? `
+    <div class="flex justify-between"><span class="text-slate-500">Rémunération nette</span><span class="text-emerald-400 font-semibold">${net > 0 ? fmtE(net) : '—'}</span></div>
+    <div class="flex justify-between"><span class="text-slate-500">${cotisLabel}</span><span class="text-red-400">${cotisVal > 0 ? '+ ' + fmtE(cotisVal) : '—'}</span></div>
+    <div class="flex justify-between font-semibold border-t border-slate-600 pt-1.5 mt-1"><span class="text-white">Coût total EURL/mois</span><span class="text-red-300">${cout > 0 ? fmtE(cout) : '—'}</span></div>
+  ` : `
+    <div class="flex justify-between"><span class="text-slate-500">Salaire brut</span><span class="text-slate-300">${brut > 0 ? fmtE(brut) : '—'}</span></div>
+    <div class="flex justify-between"><span class="text-slate-500">${cotisLabel}</span><span class="text-red-400">${cotisVal > 0 ? '+ ' + fmtE(cotisVal) : '—'}</span></div>
+    <div class="flex justify-between font-semibold border-t border-slate-600 pt-1.5 mt-1"><span class="text-white">Coût total société/mois</span><span class="text-red-300">${cout > 0 ? fmtE(cout) : '—'}</span></div>
+    <div class="flex justify-between border-t border-slate-700 pt-1.5 mt-1"><span class="text-slate-500">Net perçu</span><span class="text-emerald-400 font-semibold">${net > 0 ? fmtE(net) : '—'}</span></div>
+  `;
 }
 
 function closeDepenseModal() { document.getElementById('dep-modal')?.remove(); }
@@ -2303,15 +2667,30 @@ function saveDepense(id, societeId) {
   const debut = _parseMonth(document.getElementById('dep-debut').value);
   if (!debut) return alert('Le mois de début est obligatoire.');
 
+  const categorie = document.getElementById('dep-cat').value;
   const data = {
     id, societe_id: societeId,
     label, montant_ht: montant,
     tva_taux:    parseFloat(document.getElementById('dep-tva-val').value) || 0,
-    categorie:   document.getElementById('dep-cat').value,
+    categorie,
     periodicite: document.getElementById('dep-perio').value,
     mois_debut:  debut,
     mois_fin:    _parseMonth(document.getElementById('dep-fin').value),
     actif: true,
+    // Champs spécifiques salaire
+    ...(categorie === 'salaire' ? (() => {
+      const regime = document.getElementById('sal-regime')?.value || 'tns';
+      if (regime === 'tns') return {
+        regime_social: 'tns',
+        taux_cotis: (parseFloat(document.getElementById('dep-taux-cotis')?.value) || 45) / 100,
+      };
+      return {
+        regime_social: 'assimile_salarie',
+        salaire_mode:  document.getElementById('sal-mode')?.value || 'brut',
+        taux_patronal: (parseFloat(document.getElementById('dep-taux-pat')?.value) || 45) / 100,
+        taux_salarial: (parseFloat(document.getElementById('dep-taux-sal')?.value) || 22) / 100,
+      };
+    })() : {}),
   };
 
   if (!STATE.depenses) STATE.depenses = [];
