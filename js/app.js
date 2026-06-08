@@ -412,14 +412,15 @@ function renderSocietes(app) {
     : `<div class="space-y-3">${societes.map(s => {
         const forme = { ei: 'EI', eurl: 'EURL', sarl: 'SARL', sas: 'SAS', sasu: 'SASU', snc: 'SNC', sci: 'SCI' }[s.forme] || s.forme;
         return `
-        <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 flex items-center justify-between">
+        <div onclick="navigate('#societes/${s.id}')"
+          class="bg-slate-800 rounded-xl border border-slate-700 p-4 flex items-center justify-between cursor-pointer hover:bg-slate-750 hover:border-slate-600 transition-colors">
           <div>
             <span class="font-semibold text-white">${s.nom}</span>
             <span class="ml-2 text-slate-500 text-sm">${forme}</span>
             <span class="ml-2">${s.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue')}</span>
             ${s.capital ? `<span class="ml-2 text-slate-400 text-xs">Capital ${fmtE(s.capital)}</span>` : ''}
           </div>
-          <div class="flex gap-2">
+          <div class="flex gap-2" onclick="event.stopPropagation()">
             <button onclick="openSocieteModal('${s.id}')" class="btn-secondary text-xs">Modifier</button>
             <button onclick="deleteSociete('${s.id}')" class="btn-danger text-xs">Suppr.</button>
           </div>
@@ -1558,7 +1559,8 @@ function renderSocBilan(soc) {
       </tbody>
     </table>
   </div>
-  ${renderSimuFiscale(soc)}`;
+  ${renderSimuFiscale(soc)}
+  ${renderSimuFiscaleIS(soc)}`;
 }
 
 function _perioLabel(p) {
@@ -1842,6 +1844,277 @@ function renderFiscalResultats(soc) {
     renderDelta(scenFin, scenCour,  assietteFin, assietteCour,  'Gain vs assiette courante') +
     renderDelta(scenFin, scenInter, assietteFin, assietteInter, 'Gain vs assiette court terme')
   )}`;
+}
+
+// ─── SIMULATION FISCALE IS ───────────────────────────────────────────────────
+
+const IS_CONFIG_DEFAULTS = {
+  taux_reduit:    0.15,   // 15 % sur la tranche basse
+  taux_normal:    0.25,   // 25 % au-delà
+  seuil_reduit:   42500,  // seuil en vigueur 2024-2025 (PME CA < 10M€, capital libéré détenu par personnes physiques)
+};
+
+function getISConfig(societeId) {
+  const saved = (STATE.fiscal_configs || []).find(x => x.societe_id === societeId && x.type === 'is');
+  return Object.assign({}, IS_CONFIG_DEFAULTS, saved || {});
+}
+
+function saveISConfig(societeId) {
+  const cfg = {
+    societe_id:   societeId,
+    type:         'is',
+    taux_reduit:  parseFloat(document.getElementById('is-taux-reduit')?.value) / 100 || IS_CONFIG_DEFAULTS.taux_reduit,
+    taux_normal:  parseFloat(document.getElementById('is-taux-normal')?.value) / 100 || IS_CONFIG_DEFAULTS.taux_normal,
+    seuil_reduit: parseFloat(document.getElementById('is-seuil')?.value) || IS_CONFIG_DEFAULTS.seuil_reduit,
+  };
+  if (!STATE.fiscal_configs) STATE.fiscal_configs = [];
+  const idx = STATE.fiscal_configs.findIndex(x => x.societe_id === societeId && x.type === 'is');
+  if (idx !== -1) STATE.fiscal_configs[idx] = cfg; else STATE.fiscal_configs.push(cfg);
+  saveState();
+  const el = document.getElementById('is-resultats');
+  const soc = (STATE.societes || []).find(s => s.id === societeId);
+  if (el && soc) el.innerHTML = renderISResultats(soc);
+}
+
+function calcIS(assiette, cfg) {
+  if (assiette <= 0) return { isReduit: 0, isNormal: 0, isTotal: 0, baseReduite: 0, baseNormale: 0 };
+  const baseReduite  = Math.min(assiette, cfg.seuil_reduit);
+  const baseNormale  = Math.max(0, assiette - cfg.seuil_reduit);
+  const isReduit     = Math.round(baseReduite * cfg.taux_reduit);
+  const isNormal     = Math.round(baseNormale * cfg.taux_normal);
+  const isTotal      = isReduit + isNormal;
+  return { isReduit, isNormal, isTotal, baseReduite, baseNormale };
+}
+
+function renderISResultats(soc) {
+  const cfg        = getISConfig(soc.id);
+  const totDepsHT  = calcDepensesAnnee(soc.id, _bilanAnnee).totalHT;
+  const assietteCour  = Math.max(0, calcAssietteCourante(soc.id)       - totDepsHT);
+  const assietteInter = Math.max(0, calcAssietteIntermediaire(soc.id)  - totDepsHT);
+  const assietteFin   = Math.max(0, calcEncaissementsAnnee(soc.id, _bilanAnnee).caHT - totDepsHT);
+
+  // Dépenses de type salaire (label contenant "salaire" ou catégorie 'salaire') — pour info
+  const depsSalaires = (getDepenses(soc.id) || [])
+    .filter(d => (d.label || '').toLowerCase().includes('salaire') || (d.categorie || '').toLowerCase().includes('salaire'));
+
+  const renderBlocIS = (assiette, titre, compareAssiette = null, compareTitre = null) => {
+    const is = calcIS(assiette, cfg);
+    const resultatNet = assiette - is.isTotal;
+    const txEff = assiette > 0 ? (is.isTotal / assiette * 100).toFixed(1) : '—';
+
+    let deltaHtml = '';
+    if (compareAssiette !== null && compareAssiette > 0 && assiette > compareAssiette) {
+      const isBase = calcIS(compareAssiette, cfg);
+      const dBNC  = assiette - compareAssiette;
+      const dIS   = is.isTotal - isBase.isTotal;
+      const dNet  = resultatNet - (compareAssiette - isBase.isTotal);
+      deltaHtml = `
+      <div class="mt-4 pt-4 border-t border-slate-600">
+        <div class="flex items-baseline gap-3 mb-3">
+          <span class="text-xs text-slate-500 uppercase tracking-wide">Gain vs ${compareTitre}</span>
+          <span class="text-xs text-slate-400">Δ Résultat brut : <span class="${dBNC >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${dBNC >= 0 ? '+' : ''}${fmtE(dBNC)}</span></span>
+        </div>
+        <div class="grid grid-cols-3 gap-3 text-xs">
+          <div class="rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2">
+            <div class="text-slate-500 mb-1.5">Δ Résultat brut</div>
+            <div class="text-slate-300 font-medium">${dBNC >= 0 ? '+' : ''}${fmtE(dBNC)}</div>
+          </div>
+          <div class="rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2">
+            <div class="text-slate-500 mb-1.5">Δ IS supplémentaire</div>
+            <div class="${dIS >= 0 ? 'text-red-400' : 'text-emerald-400'} font-medium">${dIS >= 0 ? '+' : ''}${fmtE(dIS)}</div>
+          </div>
+          <div class="rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2">
+            <div class="text-slate-500 mb-1.5">Δ Résultat net</div>
+            <div class="${dNet >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${dNet >= 0 ? '+' : ''}${fmtE(dNet)}</div>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    if (assiette <= 0) return `
+    <div class="mb-6">
+      <h4 class="text-xs text-slate-500 uppercase tracking-wide mb-2">${titre}</h4>
+      <p class="text-slate-600 text-sm">Résultat nul ou négatif — pas d'IS à payer.</p>
+    </div>`;
+
+    return `
+    <div class="mb-8">
+      <div class="flex items-baseline gap-3 mb-4">
+        <h4 class="text-xs text-slate-400 uppercase tracking-wide">${titre}</h4>
+        <span class="text-white font-bold text-lg">${fmtE(assiette)}</span>
+        <span class="text-slate-600 text-xs">résultat fiscal avant IS</span>
+      </div>
+      <div class="grid grid-cols-2 gap-6">
+
+        <!-- Calcul IS -->
+        <div class="rounded-xl border border-slate-700 bg-slate-800/60 p-4">
+          <div class="text-xs text-slate-400 uppercase tracking-wide font-medium mb-3">📋 Calcul de l'IS</div>
+          <div class="space-y-1.5 text-xs">
+            ${is.baseReduite > 0 ? `
+            <div class="flex justify-between">
+              <span class="text-slate-500">Tranche ${(cfg.taux_reduit * 100).toFixed(0)} % (≤ ${fmtE(cfg.seuil_reduit)})</span>
+              <span class="text-slate-300">${fmtE(is.baseReduite)}</span>
+            </div>
+            <div class="flex justify-between pl-3">
+              <span class="text-slate-600">IS taux réduit</span>
+              <span class="text-red-400">− ${fmtE(is.isReduit)}</span>
+            </div>` : ''}
+            ${is.baseNormale > 0 ? `
+            <div class="flex justify-between ${is.baseReduite > 0 ? 'border-t border-slate-700/60 pt-1.5 mt-1' : ''}">
+              <span class="text-slate-500">Tranche ${(cfg.taux_normal * 100).toFixed(0)} % (> ${fmtE(cfg.seuil_reduit)})</span>
+              <span class="text-slate-300">${fmtE(is.baseNormale)}</span>
+            </div>
+            <div class="flex justify-between pl-3">
+              <span class="text-slate-600">IS taux normal</span>
+              <span class="text-red-400">− ${fmtE(is.isNormal)}</span>
+            </div>` : ''}
+            <div class="flex justify-between border-t border-slate-600 pt-2 mt-2 font-semibold">
+              <span class="text-white">IS total</span>
+              <span class="text-red-300">− ${fmtE(is.isTotal)}</span>
+            </div>
+            <div class="flex justify-between text-slate-500">
+              <span>Taux effectif IS</span>
+              <span>${txEff} %</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Résultat après IS -->
+        <div class="rounded-xl border border-emerald-800/40 bg-emerald-950/20 p-4">
+          <div class="text-xs text-slate-400 uppercase tracking-wide font-medium mb-3">💰 Résultat après IS</div>
+          <div class="space-y-2 text-xs">
+            <div class="flex justify-between">
+              <span class="text-slate-500">Résultat fiscal (avant IS)</span>
+              <span class="text-slate-300">${fmtE(assiette)}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-500">IS à payer</span>
+              <span class="text-red-400">− ${fmtE(is.isTotal)}</span>
+            </div>
+            <div class="flex justify-between border-t border-emerald-800/40 pt-2 mt-2">
+              <span class="text-slate-300 font-semibold">Résultat net société</span>
+              <span class="text-emerald-400 font-bold text-lg">${fmtE(resultatNet)}</span>
+            </div>
+            <div class="mt-3 pt-2 border-t border-slate-700/40 space-y-1">
+              <div class="text-slate-600 text-xs mb-1">Affectation du résultat</div>
+              <div class="flex justify-between">
+                <span class="text-slate-500">Résultat mis en réserve / report</span>
+                <span class="text-slate-400">${fmtE(resultatNet)}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-500">Salaires versés (charges incluses)</span>
+                <span class="text-slate-400">${fmtE(depsSalaires.reduce((s, d) => s + calcDepensesAnnee_single(d, soc.id), 0))}</span>
+              </div>
+            </div>
+            <p class="text-slate-700 text-xs mt-2 italic">Les dividendes seront disponibles après approbation des comptes (N+1). La distribution est à ajouter séparément.</p>
+          </div>
+        </div>
+
+      </div>
+      ${deltaHtml}
+    </div>`;
+  };
+
+  const deltaIS = (assietteComp, assietteBase, labelBase) => {
+    if (!assietteBase || assietteBase <= 0 || assietteComp <= assietteBase) return '';
+    const isComp = calcIS(assietteComp, cfg);
+    const isBase = calcIS(assietteBase, cfg);
+    const dBNC = assietteComp - assietteBase;
+    const dIS  = isComp.isTotal - isBase.isTotal;
+    const dNet = (assietteComp - isComp.isTotal) - (assietteBase - isBase.isTotal);
+    return `
+    <div class="mt-4 pt-4 border-t border-slate-600">
+      <div class="flex items-baseline gap-3 mb-3">
+        <span class="text-xs text-slate-500 uppercase tracking-wide">Gain vs ${labelBase}</span>
+        <span class="text-xs text-slate-400">Δ Résultat brut : <span class="${dBNC >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${dBNC >= 0 ? '+' : ''}${fmtE(dBNC)}</span></span>
+      </div>
+      <div class="grid grid-cols-3 gap-3 text-xs">
+        <div class="rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2">
+          <div class="text-slate-500 mb-1.5">Δ Résultat brut</div>
+          <div class="text-slate-300 font-medium">${dBNC >= 0 ? '+' : ''}${fmtE(dBNC)}</div>
+        </div>
+        <div class="rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2">
+          <div class="text-slate-500 mb-1.5">Δ IS supplémentaire</div>
+          <div class="${dIS >= 0 ? 'text-red-400' : 'text-emerald-400'} font-medium">${dIS >= 0 ? '+' : ''}${fmtE(dIS)}</div>
+        </div>
+        <div class="rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2">
+          <div class="text-slate-500 mb-1.5">Δ Résultat net</div>
+          <div class="${dNet >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${dNet >= 0 ? '+' : ''}${fmtE(dNet)}</div>
+        </div>
+      </div>
+    </div>`;
+  };
+
+  return `
+  ${renderBlocIS(assietteCour,  '✅ Résultat courant (paiements confirmés)')}
+  <div class="border-t border-slate-700 my-6"></div>
+  ${renderBlocIS(assietteInter, '⏳ Résultat court terme (confirmés + prévus)', assietteCour, 'assiette courante')}
+  <div class="border-t border-slate-700 my-6"></div>
+  ${renderBlocIS(assietteFin,   `📅 Résultat prévisionnel fin ${_bilanAnnee}`,  assietteCour, 'assiette courante')}
+  ${deltaIS(assietteFin, assietteInter, 'assiette court terme')}`;
+}
+
+function calcDepensesAnnee_single(dep, societeId) {
+  // Calcule le total annuel d'une seule dépense pour l'année bilan
+  return calcDepensesAnnee_dep(dep, _bilanAnnee);
+}
+
+function calcDepensesAnnee_dep(dep, annee) {
+  let total = 0;
+  for (let m = 1; m <= 12; m++) total += calcDepenseMois(dep, annee, m);
+  return total;
+}
+
+function renderSimuFiscaleIS(soc) {
+  if (soc.regime_fiscal !== 'is') return '';
+  const cfg = getISConfig(soc.id);
+
+  return `
+  <div class="mt-8 pt-6 border-t-2 border-slate-600">
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <h3 class="text-white font-semibold text-lg">Simulation fiscale — IS</h3>
+        <p class="text-slate-500 text-sm mt-0.5">Impôt sur les Sociétés · résultats par assiette</p>
+      </div>
+      <span class="text-xs px-2 py-1 rounded bg-blue-900/40 text-blue-300 border border-blue-700/40">IS</span>
+    </div>
+
+    <!-- Paramètres IS -->
+    <details class="mb-6 bg-slate-800/40 border border-slate-700 rounded-xl">
+      <summary class="px-4 py-3 flex items-center justify-between cursor-pointer">
+        <span class="text-sm text-slate-300 font-medium">⚙️ Paramètres IS <span class="text-slate-600 font-normal">(taux et seuil personnalisables)</span></span>
+        <span class="chevron text-slate-500 text-xs">▼</span>
+      </summary>
+      <div class="px-4 pb-4 pt-2 grid grid-cols-3 gap-4">
+        <div>
+          <label class="label">Taux réduit (%)</label>
+          <input id="is-taux-reduit" class="input" type="number" min="0" max="100" step="0.1"
+            value="${(cfg.taux_reduit * 100).toFixed(1)}"
+            onchange="saveISConfig('${soc.id}')" />
+          <p class="text-slate-600 text-xs mt-1">Défaut : 15 %</p>
+        </div>
+        <div>
+          <label class="label">Seuil taux réduit (€)</label>
+          <input id="is-seuil" class="input" type="number" min="0" step="500"
+            value="${cfg.seuil_reduit}"
+            onchange="saveISConfig('${soc.id}')" />
+          <p class="text-slate-600 text-xs mt-1">Défaut : 42 500 €</p>
+        </div>
+        <div>
+          <label class="label">Taux normal (%)</label>
+          <input id="is-taux-normal" class="input" type="number" min="0" max="100" step="0.1"
+            value="${(cfg.taux_normal * 100).toFixed(1)}"
+            onchange="saveISConfig('${soc.id}')" />
+          <p class="text-slate-600 text-xs mt-1">Défaut : 25 %</p>
+        </div>
+      </div>
+      <div class="px-4 pb-3">
+        <p class="text-slate-600 text-xs">⚠️ Le taux réduit 15 % s'applique aux PME dont le CA est inférieur à 10 M€ et dont le capital est intégralement libéré et détenu à 75 % par des personnes physiques.</p>
+      </div>
+    </details>
+
+    <div id="is-resultats">${renderISResultats(soc)}</div>
+  </div>`;
 }
 
 function renderSimuFiscale(soc) {
