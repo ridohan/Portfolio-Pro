@@ -1648,102 +1648,124 @@ function renderRemunerations(soc, annee) {
   const moisCourant   = now.getMonth() + 1;
   const anneeCourante = now.getFullYear();
 
-  // Totaux annuels par ligne de salaire
+  // Totaux annuels par ligne — utilise les helpers qui gèrent TNS vs assimilé-salarié
   const lignes = salDeps.map(dep => {
-    let totBrut = 0, totPat = 0, totSal = 0, totNet = 0, totCout = 0;
-    const pat = dep.taux_patronal ?? SALAIRE_DEFAULTS.taux_patronal;
-    const sal = dep.taux_salarial ?? SALAIRE_DEFAULTS.taux_salarial;
+    const isTNS = !dep.regime_social || dep.regime_social === 'tns';
+    let totNet = 0, totCout = 0, totCotis = 0;
     for (let m = 1; m <= 12; m++) {
-      const brut = (() => {
-        // Récupère le brut mensuel selon périodicité (sans multiplicateur charges)
+      const net  = calcSalaireNetMois(dep, annee, m);
+      const cout = (() => {
+        // Récupère le coût brut pour ce mois (même logique périodicité que calcDepenseMois)
         if (dep.mois_debut) {
           if (annee < dep.mois_debut.annee || (annee === dep.mois_debut.annee && m < dep.mois_debut.mois)) return 0;
         }
         if (dep.mois_fin) {
           if (annee > dep.mois_fin.annee || (annee === dep.mois_fin.annee && m > dep.mois_fin.mois)) return 0;
         }
-        const startMois = dep.mois_debut?.mois || 1;
-        switch (dep.periodicite) {
-          case 'mensuelle':     return dep.montant_ht;
-          case 'trimestrielle': return ((m - startMois + 12) % 3 === 0) ? dep.montant_ht : 0;
-          case 'semestrielle':  return ((m - startMois + 12) % 6 === 0) ? dep.montant_ht : 0;
-          case 'annuelle':      return m === startMois ? dep.montant_ht : 0;
-          case 'ponctuelle':    return (dep.mois_debut?.annee === annee && dep.mois_debut?.mois === m) ? dep.montant_ht : 0;
-          default: return 0;
-        }
+        return net > 0 ? _salaireCoutSociete(dep) : 0;
       })();
-      totBrut += brut;
-      totPat  += Math.round(brut * pat);
-      totSal  += Math.round(brut * sal);
-      totNet  += Math.round(brut * (1 - sal));
-      totCout += Math.round(brut * (1 + pat));
+      totNet  += net;
+      totCout += cout;
+      totCotis += Math.max(0, cout - net);
     }
-    return { dep, totBrut, totPat, totSal, totNet, totCout };
+    // Pour assimilé-salarié : brut = montant_ht × nb mois actifs
+    const totBrut = isTNS ? totNet : (() => {
+      let b = 0;
+      for (let m = 1; m <= 12; m++) {
+        if (dep.mois_debut) { if (annee < dep.mois_debut.annee || (annee === dep.mois_debut.annee && m < dep.mois_debut.mois)) continue; }
+        if (dep.mois_fin)   { if (annee > dep.mois_fin.annee   || (annee === dep.mois_fin.annee   && m > dep.mois_fin.mois))   continue; }
+        const sm = dep.mois_debut?.mois || 1;
+        let ok = false;
+        switch (dep.periodicite) {
+          case 'mensuelle':     ok = true; break;
+          case 'trimestrielle': ok = ((m - sm + 12) % 3 === 0); break;
+          case 'semestrielle':  ok = ((m - sm + 12) % 6 === 0); break;
+          case 'annuelle':      ok = (m === sm); break;
+          case 'ponctuelle':    ok = (dep.mois_debut?.annee === annee && dep.mois_debut?.mois === m); break;
+        }
+        if (ok) b += dep.montant_ht;
+      }
+      return b;
+    })();
+    return { dep, isTNS, totNet, totCout, totCotis, totBrut };
   });
 
-  const grandTotBrut = lignes.reduce((s, l) => s + l.totBrut, 0);
-  const grandTotPat  = lignes.reduce((s, l) => s + l.totPat,  0);
-  const grandTotNet  = lignes.reduce((s, l) => s + l.totNet,  0);
-  const grandTotCout = lignes.reduce((s, l) => s + l.totCout, 0);
+  const grandTotNet   = lignes.reduce((s, l) => s + l.totNet,   0);
+  const grandTotCout  = lignes.reduce((s, l) => s + l.totCout,  0);
+  const grandTotCotis = lignes.reduce((s, l) => s + l.totCotis, 0);
 
-  // Tableau mensuel net perçu
+  // Détermine si on a un mix de régimes
+  const hasTNS = lignes.some(l => l.isTNS);
+  const hasAS  = lignes.some(l => !l.isTNS);
+  const mixte  = hasTNS && hasAS;
+
   const TH2  = (cur) => `px-2 py-2 text-center text-xs font-semibold border-r border-slate-700 ${cur ? 'bg-blue-900/40 text-blue-200' : 'bg-slate-700 text-slate-200'}`;
   const TD2  = (cur) => `px-2 py-1.5 text-center text-xs border-r border-slate-600 ${cur ? 'bg-blue-950/30' : ''}`;
-  const TDL2 = `px-3 py-2 text-left text-xs border-r border-slate-700 sticky left-0 z-10 min-w-[180px]`;
+  const TDL2 = `px-3 py-2 text-left text-xs border-r border-slate-700 sticky left-0 z-10 min-w-[200px]`;
 
-  const salRows = salDeps.map(dep => {
-    const pat = dep.taux_patronal ?? SALAIRE_DEFAULTS.taux_patronal;
-    const sal = dep.taux_salarial ?? SALAIRE_DEFAULTS.taux_salarial;
+  const salRows = lignes.map(({ dep, isTNS, totNet }) => {
     const cells = Array.from({ length: 12 }, (_, i) => {
       const m   = i + 1;
       const net = calcSalaireNetMois(dep, annee, m);
       const cur = annee === anneeCourante && m === moisCourant;
       return `<td class="${TD2(cur)} bg-emerald-950/10">${net > 0 ? `<span class="text-emerald-400">${fmtE(net)}</span>` : '<span class="text-slate-800">—</span>'}</td>`;
     }).join('');
-    let totNet = 0;
-    for (let m = 1; m <= 12; m++) totNet += calcSalaireNetMois(dep, annee, m);
+    const badge = isTNS
+      ? `<span class="text-xs px-1.5 py-0.5 rounded bg-blue-900/40 text-blue-400 ml-1">TNS</span>`
+      : `<span class="text-xs px-1.5 py-0.5 rounded bg-purple-900/40 text-purple-400 ml-1">Sal.</span>`;
+    const taux = isTNS
+      ? `${((dep.taux_cotis ?? SALAIRE_DEFAULTS.tns.taux_cotis) * 100).toFixed(0)}% cotis.`
+      : `${((dep.taux_salarial ?? SALAIRE_DEFAULTS.assimile_salarie.taux_salarial) * 100).toFixed(0)}% ch.sal.`;
     return `<tr class="border-b border-slate-700/30">
       <td class="${TDL2} bg-emerald-950/10">
-        <span class="text-slate-300">${dep.label}</span>
-        <span class="text-slate-600 text-xs ml-1">(${(sal*100).toFixed(0)}% ch. sal.)</span>
+        <span class="text-slate-300">${dep.label}</span>${badge}
+        <span class="text-slate-600 text-xs ml-1">(${taux})</span>
       </td>
       ${cells}
       <td class="px-3 py-2 text-center text-xs font-bold border-r border-slate-500 bg-emerald-900/30 text-emerald-300">${totNet > 0 ? fmtE(totNet) : '—'}</td>
     </tr>`;
   }).join('');
 
+  // Labels KPIs adaptés selon le régime
+  const kpi2label = hasTNS && !hasAS ? 'Rémunération nette annuelle' : 'Salaire brut annuel';
+  const kpi2sub   = hasTNS && !hasAS ? 'versée par la société' : 'avant charges salariales';
+  const kpi3label = hasTNS && !hasAS ? 'Cotisations TNS (URSSAF)' : 'Charges patronales / cotisations';
+  const kpi3sub   = hasTNS && !hasAS ? 'payées à l\'URSSAF' : 'à la charge de la société';
+  const kpi4sub   = hasTNS && !hasAS ? 'ce que vous encaissez' : 'après charges salariales';
+  const grandTotBrut = lignes.reduce((s, l) => s + l.totBrut, 0);
+
   return `
   <div class="mt-6 pt-6 border-t border-slate-700">
     <h3 class="text-white font-semibold mb-1">👤 Rémunérations</h3>
-    <p class="text-slate-500 text-xs mb-4">Synthèse des salaires saisis en dépenses · le coût total société inclut les charges patronales</p>
+    <p class="text-slate-500 text-xs mb-4">Synthèse des rémunérations saisies en dépenses · le coût total inclut les cotisations${mixte ? ' · mix TNS + assimilé-salarié' : ''}</p>
 
     <!-- KPIs rémunération -->
     <div class="grid grid-cols-4 gap-3 mb-5">
       <div class="bg-slate-800 rounded-xl border border-slate-700 p-3">
         <div class="text-slate-500 text-xs mb-1">Coût total société</div>
         <div class="text-red-300 font-bold text-lg">${fmtE(grandTotCout)}</div>
-        <div class="text-slate-600 text-xs mt-0.5">brut + ch. patronales / an</div>
+        <div class="text-slate-600 text-xs mt-0.5">rémunération + cotisations / an</div>
       </div>
       <div class="bg-slate-800 rounded-xl border border-slate-700 p-3">
-        <div class="text-slate-500 text-xs mb-1">Salaire brut annuel</div>
+        <div class="text-slate-500 text-xs mb-1">${kpi2label}</div>
         <div class="text-slate-300 font-bold text-lg">${fmtE(grandTotBrut)}</div>
-        <div class="text-slate-600 text-xs mt-0.5">avant charges salariales</div>
+        <div class="text-slate-600 text-xs mt-0.5">${kpi2sub}</div>
       </div>
       <div class="bg-slate-800 rounded-xl border border-slate-700 p-3">
-        <div class="text-slate-500 text-xs mb-1">Charges patronales</div>
-        <div class="text-red-400 font-bold text-lg">${fmtE(grandTotPat)}</div>
-        <div class="text-slate-600 text-xs mt-0.5">à la charge de la société</div>
+        <div class="text-slate-500 text-xs mb-1">${kpi3label}</div>
+        <div class="text-red-400 font-bold text-lg">${fmtE(grandTotCotis)}</div>
+        <div class="text-slate-600 text-xs mt-0.5">${kpi3sub}</div>
       </div>
       <div class="bg-slate-800 rounded-xl border border-emerald-800/40 p-3 bg-emerald-950/20">
         <div class="text-slate-500 text-xs mb-1">Net perçu annuel</div>
         <div class="text-emerald-400 font-bold text-lg">${fmtE(grandTotNet)}</div>
-        <div class="text-slate-600 text-xs mt-0.5">après charges salariales</div>
+        <div class="text-slate-600 text-xs mt-0.5">${kpi4sub}</div>
       </div>
     </div>
 
     <!-- Tableau mensuel net perçu -->
     <div class="overflow-x-auto rounded-xl border border-slate-600 mb-4">
-      <table class="w-full text-sm border-collapse" style="min-width:${180 + 12*100 + 105}px">
+      <table class="w-full text-sm border-collapse" style="min-width:${200 + 12*100 + 105}px">
         <thead>
           <tr class="border-b-2 border-slate-500">
             <th class="${TDL2} bg-slate-700 text-slate-400 font-medium text-xs">Net mensuel perçu</th>
@@ -1758,16 +1780,34 @@ function renderRemunerations(soc, annee) {
     <!-- Détail par ligne de salaire -->
     ${lignes.length > 1 ? `
     <div class="space-y-2">
-      ${lignes.map(l => `
-      <div class="flex items-center justify-between bg-slate-800/40 border border-slate-700/60 rounded-lg px-4 py-2 text-xs">
-        <span class="text-slate-300 font-medium">${l.dep.label}</span>
-        <div class="flex gap-6">
-          <span class="text-slate-500">Brut/mois <span class="text-slate-300">${fmtE(l.dep.montant_ht)}</span></span>
-          <span class="text-slate-500">Ch. pat. <span class="text-red-400">${fmtE(Math.round(l.dep.montant_ht * (l.dep.taux_patronal ?? SALAIRE_DEFAULTS.taux_patronal)))}</span></span>
-          <span class="text-slate-500">Net/mois <span class="text-emerald-400 font-semibold">${fmtE(Math.round(l.dep.montant_ht * (1 - (l.dep.taux_salarial ?? SALAIRE_DEFAULTS.taux_salarial))))}</span></span>
-          <span class="text-slate-500">Coût soc. <span class="text-red-300">${fmtE(Math.round(l.dep.montant_ht * (1 + (l.dep.taux_patronal ?? SALAIRE_DEFAULTS.taux_patronal))))}</span></span>
-        </div>
-      </div>`).join('')}
+      ${lignes.map(l => {
+        const netM  = _salaireNetMensuel(l.dep);
+        const coutM = _salaireCoutSociete(l.dep);
+        const cotisM = coutM - netM;
+        if (l.isTNS) {
+          const tauxCotis = ((l.dep.taux_cotis ?? SALAIRE_DEFAULTS.tns.taux_cotis) * 100).toFixed(0);
+          return `
+          <div class="flex items-center justify-between bg-slate-800/40 border border-slate-700/60 rounded-lg px-4 py-2 text-xs">
+            <span class="text-slate-300 font-medium">${l.dep.label} <span class="text-blue-400 ml-1">TNS</span></span>
+            <div class="flex gap-6">
+              <span class="text-slate-500">Rémunération nette <span class="text-emerald-400 font-semibold">${fmtE(netM)}/mois</span></span>
+              <span class="text-slate-500">Cotisations URSSAF (${tauxCotis}%) <span class="text-red-400">${fmtE(cotisM)}/mois</span></span>
+              <span class="text-slate-500">Coût total <span class="text-red-300">${fmtE(coutM)}/mois</span></span>
+            </div>
+          </div>`;
+        }
+        const tauxPat = ((l.dep.taux_patronal ?? SALAIRE_DEFAULTS.assimile_salarie.taux_patronal) * 100).toFixed(0);
+        return `
+        <div class="flex items-center justify-between bg-slate-800/40 border border-slate-700/60 rounded-lg px-4 py-2 text-xs">
+          <span class="text-slate-300 font-medium">${l.dep.label} <span class="text-purple-400 ml-1">Sal.</span></span>
+          <div class="flex gap-6">
+            <span class="text-slate-500">Brut/mois <span class="text-slate-300">${fmtE(l.dep.montant_ht)}</span></span>
+            <span class="text-slate-500">Ch. pat. (${tauxPat}%) <span class="text-red-400">${fmtE(cotisM)}</span></span>
+            <span class="text-slate-500">Net/mois <span class="text-emerald-400 font-semibold">${fmtE(netM)}</span></span>
+            <span class="text-slate-500">Coût soc. <span class="text-red-300">${fmtE(coutM)}</span></span>
+          </div>
+        </div>`;
+      }).join('')}
     </div>` : ''}
   </div>`;
 }
