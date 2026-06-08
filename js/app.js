@@ -340,65 +340,267 @@ function resetData() {
 function renderDashboard(app) {
   const societes = STATE.societes || [];
   const simuls   = STATE.simulations_ir || [];
+  const annee    = new Date().getFullYear();
+  const now      = new Date();
+  const moisCur  = now.getMonth() + 1;
 
-  const cardsHtml = societes.length === 0
+  // ── Calcul agrégé par société ──────────────────────────────────────────────
+  const socData = societes.map(s => {
+    const totDepsHT   = calcDepensesAnnee(s.id, annee).totalHT;
+    const caFin       = calcEncaissementsAnnee(s.id, annee).caHT;
+    const caCour      = calcAssietteCourante(s.id);
+    const caInter     = calcAssietteIntermediaire(s.id);
+    const resultatFin = Math.max(0, caFin    - totDepsHT);
+    const resultatCour= Math.max(0, caCour   - totDepsHT);
+
+    // CA du mois courant
+    const encMois     = calcEncaissementsMois(s.id, annee, moisCur);
+
+    // Rémunérations
+    const salDeps     = getDepenses(s.id).filter(d => d.categorie === 'salaire');
+    const netAnnuel   = salDeps.reduce((sum, dep) => {
+      let t = 0; for (let m = 1; m <= 12; m++) t += calcSalaireNetMois(dep, annee, m); return sum + t;
+    }, 0);
+
+    // Fiscalité estimée + net final (selon régime)
+    let fiscEstim = null, netFinal = null;
+    if (s.regime_fiscal === 'is' && resultatFin > 0) {
+      const cfg  = getISConfig(s.id);
+      const is   = calcIS(resultatFin, cfg);
+      fiscEstim  = is.isTotal;
+      netFinal   = resultatFin - is.isTotal;
+    } else if (s.regime_fiscal === 'ir' && resultatFin > 0) {
+      const cfg  = getBilanIRConfig(s.id);
+      const scen = calcScenariosIR(resultatFin, cfg);
+      const s97  = scen[1]; // scénario 9,7% CSG
+      fiscEstim  = s97.ir.impotFinal + s97.csgMontant;
+      netFinal   = s97.netImpot;
+    }
+
+    const missions = getMissionsActives(s.id);
+    return { s, caFin, caCour, caInter, resultatFin, resultatCour, encMois, netAnnuel, fiscEstim, netFinal, totDepsHT, missions };
+  });
+
+  // ── KPIs globaux ─────────────────────────────────────────────────────────
+  const totalCAFin    = socData.reduce((sum, d) => sum + d.caFin,      0);
+  const totalCACour   = socData.reduce((sum, d) => sum + d.caCour,     0);
+  const totalDeps     = socData.reduce((sum, d) => sum + d.totDepsHT,  0);
+  const totalFisc     = socData.reduce((sum, d) => sum + (d.fiscEstim || 0), 0);
+
+  // Nets IR et IS séparés
+  const socsIR     = socData.filter(d => d.s.regime_fiscal === 'ir' && d.netFinal !== null);
+  const socsIS     = socData.filter(d => d.s.regime_fiscal === 'is' && d.netFinal !== null);
+  const totalNetIR = socsIR.reduce((sum, d) => sum + d.netFinal, 0);
+  const totalNetIS = socsIS.reduce((sum, d) => sum + d.netFinal, 0);
+  const hasIR      = socsIR.length > 0;
+  const hasIS      = socsIS.length > 0;
+
+  const pctEncaisse = totalCAFin > 0 ? Math.round(totalCACour / totalCAFin * 100) : 0;
+
+  const kpiBar = (label, val, sub, color = 'text-white', border = 'border-slate-700', extra = '') => `
+    <div class="bg-slate-800 rounded-xl border ${border} p-4 ${extra}">
+      <div class="text-slate-500 text-xs mb-1">${label}</div>
+      <div class="${color} font-bold text-2xl">${fmtE(val)}</div>
+      <div class="text-slate-600 text-xs mt-1">${sub}</div>
+    </div>`;
+
+  // Cartes net IR et net IS
+  const netIRCard = hasIR ? kpiBar(
+    '💰 Net d\'impôt IR',
+    totalNetIR,
+    `${socsIR.length} sté IR · scén. 9,7% CSG · assiette fin d'année`,
+    totalNetIR >= 0 ? 'text-emerald-400' : 'text-red-400',
+    'border-emerald-700/50',
+    'bg-emerald-950/10'
+  ) : '';
+
+  const netISCard = hasIS ? kpiBar(
+    '🏢 Résultat net après IS',
+    totalNetIS,
+    `${socsIS.length} sté IS · résultat fiscal − IS`,
+    totalNetIS >= 0 ? 'text-emerald-400' : 'text-red-400',
+    'border-blue-700/40',
+    'bg-blue-950/10'
+  ) : '';
+
+  // Nombre de colonnes dynamique selon les cartes actives
+  const netCards   = [netIRCard, netISCard].filter(Boolean).join('');
+  const nbNetCards = (hasIR ? 1 : 0) + (hasIS ? 1 : 0);
+  const gridCols   = 2 + nbNetCards; // 2 fixes + 1 ou 2 cartes net
+
+  const globalKpis = societes.length === 0 ? '' : `
+  <div class="grid grid-cols-2 lg:grid-cols-${gridCols} gap-3 mb-6">
+    ${kpiBar('CA prévisionnel ' + annee, totalCAFin, 'toutes sociétés confondues', 'text-white')}
+    ${kpiBar('CA encaissé ✅', totalCACour, `${pctEncaisse}% du prévisionnel`, 'text-emerald-400', 'border-emerald-800/40')}
+    ${netCards}
+  </div>
+  <div class="grid grid-cols-2 lg:grid-cols-2 gap-3 mb-6">
+    ${kpiBar('Dépenses totales', totalDeps, 'charges toutes sociétés', 'text-red-300', 'border-red-900/30')}
+    ${kpiBar('Fiscalité estimée', totalFisc, 'IS + IR scénario 9,7% CSG', 'text-amber-400', 'border-amber-900/30')}
+  </div>`;
+
+  // ── Carte par société ──────────────────────────────────────────────────────
+  const socCards = societes.length === 0
     ? `<div class="col-span-full text-center py-12 text-slate-500">
         <p class="text-lg mb-2">Aucune société configurée</p>
         <a href="#societes" class="btn-primary text-sm">Ajouter une société</a>
        </div>`
-    : societes.map(s => {
-        const forme = { ei: 'EI', eurl: 'EURL', sarl: 'SARL', sas: 'SAS', sasu: 'SASU', snc: 'SNC', sci: 'SCI' }[s.forme] || s.forme;
-        const regime = s.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue');
+    : socData.map(({ s, caFin, caCour, resultatFin, resultatCour, encMois, netAnnuel, fiscEstim, netFinal, totDepsHT, missions }) => {
+        const forme  = { ei: 'EI', eurl: 'EURL', sarl: 'SARL', sas: 'SAS', sasu: 'SASU', snc: 'SNC', sci: 'SCI' }[s.forme] || s.forme;
+        const reg    = s.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue');
+        const pct    = caFin > 0 ? Math.round(caCour / caFin * 100) : 0;
+        const barW   = Math.min(100, pct);
+
+        // Ligne missions actives
+        const missionsList = missions.length > 0
+          ? missions.map(m => `<span class="inline-flex items-center gap-1 text-xs bg-slate-700/60 rounded px-1.5 py-0.5 text-slate-400">${m.client} <span class="text-slate-600">${fmtE(m.tjm)}/j</span></span>`).join(' ')
+          : `<span class="text-slate-700 text-xs italic">Aucune mission active</span>`;
+
+        const fiscLine = fiscEstim !== null ? `
+          <div class="flex justify-between items-center text-xs">
+            <span class="text-slate-500">Fiscalité estimée (${s.regime_fiscal === 'is' ? 'IS' : 'IR ~9,7% CSG'})</span>
+            <span class="text-amber-400 font-medium">− ${fmtE(fiscEstim)}</span>
+          </div>` : '';
+
+        const netFinalLine = netFinal !== null ? `
+          <div class="flex justify-between items-center text-sm border-t border-slate-600 pt-2 mt-1">
+            <span class="text-slate-300 font-semibold">${s.regime_fiscal === 'is' ? 'Résultat net après IS' : 'Net d\'impôt (scén. 9,7%)'}</span>
+            <span class="${netFinal >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold text-base">${fmtE(netFinal)}</span>
+          </div>` : '';
+
+        const netSalLine = netAnnuel > 0 ? `
+          <div class="flex justify-between items-center text-xs">
+            <span class="text-slate-500">Net perçu (rémunérations)</span>
+            <span class="text-emerald-400 font-medium">${fmtE(netAnnuel)}</span>
+          </div>` : '';
+
+        const encMoisLine = encMois.totalHT > 0 ? `
+          <div class="flex justify-between items-center text-xs border-t border-slate-700/50 pt-2 mt-2">
+            <span class="text-slate-500">CA encaissé ce mois</span>
+            <span class="text-slate-300 font-medium">${fmtE(encMois.totalHT)}</span>
+          </div>` : '';
+
         return `
-        <a href="#societes/${s.id}" class="block bg-slate-800 rounded-xl p-4 border border-slate-700 hover:border-blue-500 transition-colors">
-          <div class="flex items-start justify-between mb-2">
-            <span class="font-semibold text-white">${s.nom}</span>
-            ${regime}
+        <a href="#societes/${s.id}" class="block bg-slate-800 rounded-xl border border-slate-700 hover:border-slate-500 transition-colors overflow-hidden">
+          <!-- Header -->
+          <div class="px-4 pt-4 pb-3 flex items-start justify-between">
+            <div>
+              <div class="font-semibold text-white text-base">${s.nom}</div>
+              <div class="text-slate-500 text-xs mt-0.5">${forme} · ${missions.length} mission${missions.length > 1 ? 's' : ''} active${missions.length > 1 ? 's' : ''}</div>
+            </div>
+            ${reg}
           </div>
-          <div class="text-slate-400 text-sm">${forme}</div>
-          ${s.capital ? `<div class="text-slate-500 text-xs mt-1">Capital : ${fmtE(s.capital)}</div>` : ''}
+
+          <!-- Barre de progression CA -->
+          <div class="px-4 pb-3">
+            <div class="flex justify-between text-xs mb-1">
+              <span class="text-slate-500">CA encaissé <span class="text-emerald-400 font-medium">${fmtE(caCour)}</span></span>
+              <span class="text-slate-600">/ prév. <span class="text-slate-400">${fmtE(caFin)}</span> · <span class="${pct >= 75 ? 'text-emerald-400' : pct >= 40 ? 'text-amber-400' : 'text-slate-500'}">${pct}%</span></span>
+            </div>
+            <div class="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+              <div class="h-full rounded-full ${pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-slate-500'} transition-all" style="width:${barW}%"></div>
+            </div>
+          </div>
+
+          <!-- Métriques -->
+          <div class="px-4 pb-3 space-y-1.5 border-t border-slate-700/50 pt-3">
+            <div class="flex justify-between items-center text-xs">
+              <span class="text-slate-500">Résultat avant impôt (fin d'année)</span>
+              <span class="${resultatFin > 0 ? 'text-white' : 'text-red-400'} font-semibold">${fmtE(resultatFin)}</span>
+            </div>
+            <div class="flex justify-between items-center text-xs">
+              <span class="text-slate-500">Dépenses</span>
+              <span class="text-red-300">${fmtE(totDepsHT)}</span>
+            </div>
+            ${fiscLine}
+            ${netFinalLine}
+            ${netSalLine}
+            ${encMoisLine}
+          </div>
+
+          <!-- Missions -->
+          <div class="px-4 pb-4 pt-1 border-t border-slate-700/40 flex flex-wrap gap-1">
+            ${missionsList}
+          </div>
         </a>`;
       }).join('');
 
+  // ── Récap mensuel (revenus mois par mois toutes sociétés) ─────────────────
+  const moisLabels = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
+  const mensuelRows = societes.length > 0 ? societes.map(s => {
+    const cells = moisLabels.map((lbl, i) => {
+      const m   = i + 1;
+      const enc = calcEncaissementsMois(s.id, annee, m);
+      const cur = m === moisCur;
+      const cls = cur ? 'bg-blue-950/30 font-semibold' : '';
+      const col = enc.totalRecuHT > 0 ? 'text-emerald-400' : enc.totalHT > 0 ? 'text-slate-400' : 'text-slate-800';
+      return `<td class="px-2 py-2 text-center text-xs border-r border-slate-700 ${cls}"><span class="${col}">${enc.totalHT > 0 ? fmtE(enc.totalHT) : '—'}</span></td>`;
+    }).join('');
+    const totAnnuel = calcEncaissementsAnnee(s.id, annee).caHT;
+    return `<tr class="border-b border-slate-700/30">
+      <td class="px-3 py-2 text-xs text-slate-300 sticky left-0 bg-slate-800 border-r border-slate-700 min-w-[140px]">${s.nom}</td>
+      ${cells}
+      <td class="px-3 py-2 text-center text-xs font-bold text-white bg-slate-700/50 border-r border-slate-600">${fmtE(totAnnuel)}</td>
+    </tr>`;
+  }).join('') : '';
+
+  const mensuelTable = societes.length > 0 ? `
+  <div class="mb-6">
+    <h2 class="text-base font-semibold text-white mb-3">📅 CA mensuel ${annee} — toutes sociétés</h2>
+    <div class="overflow-x-auto rounded-xl border border-slate-600">
+      <table class="w-full text-sm border-collapse" style="min-width:${140 + 12*90 + 100}px">
+        <thead>
+          <tr class="border-b-2 border-slate-500">
+            <th class="px-3 py-2 text-left text-xs text-slate-400 bg-slate-700 sticky left-0 border-r border-slate-600">Société</th>
+            ${moisLabels.map((l, i) => `<th class="px-2 py-2 text-center text-xs font-semibold border-r border-slate-700 ${i + 1 === moisCur ? 'bg-blue-900/40 text-blue-200' : 'bg-slate-700 text-slate-300'}">${l}</th>`).join('')}
+            <th class="px-3 py-2 text-center text-xs font-bold bg-slate-600 text-white border-r border-slate-500">Total</th>
+          </tr>
+        </thead>
+        <tbody>${mensuelRows}</tbody>
+      </table>
+    </div>
+    <p class="text-slate-700 text-xs mt-1.5">Vert = encaissé ✅ · gris = prévu · — = pas de CA ce mois</p>
+  </div>` : '';
+
+  // ── Dernières simulations IR ───────────────────────────────────────────────
   const lastSimHtml = simuls.length > 0 ? `
-    <div class="bg-slate-800 rounded-xl border border-slate-700 p-4">
-      <h3 class="font-semibold text-white mb-3">Dernières simulations IR</h3>
-      <div class="space-y-2">
-        ${simuls.slice(-5).reverse().map(s => `
-          <a href="#ir/${s.id}" class="flex items-center justify-between py-2 border-b border-slate-700/50 hover:text-blue-400 transition-colors">
-            <span class="text-sm text-slate-300">${s.nom || 'Simulation sans titre'}</span>
-            <span class="text-xs text-slate-500">${s.annee || ''}</span>
-          </a>`).join('')}
-      </div>
-      <a href="#ir" class="btn-secondary text-xs mt-3 block text-center">Nouvelle simulation</a>
-    </div>` : '';
+  <div class="bg-slate-800 rounded-xl border border-slate-700 p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="font-semibold text-white">Dernières simulations IR</h3>
+      <a href="#ir" class="btn-secondary text-xs">Nouvelle</a>
+    </div>
+    <div class="space-y-1">
+      ${simuls.slice(-5).reverse().map(s => `
+        <a href="#ir/${s.id}" class="flex items-center justify-between py-2 px-2 rounded-lg hover:bg-slate-700/50 transition-colors">
+          <span class="text-sm text-slate-300">${s.nom || 'Simulation sans titre'}</span>
+          <div class="flex items-center gap-3">
+            <span class="text-emerald-400 text-xs font-medium">${fmtE(s.summary?.impotFinal || 0)}</span>
+            <span class="text-slate-600 text-xs">${s.summary?.annee || ''}</span>
+          </div>
+        </a>`).join('')}
+    </div>
+  </div>` : '';
 
   app.innerHTML = `
   ${navBar('dashboard')}
   <div class="page-container px-4 py-6">
     <div class="flex items-center justify-between mb-6">
-      <h1 class="text-xl font-bold text-white">Dashboard</h1>
+      <div>
+        <h1 class="text-xl font-bold text-white">Dashboard</h1>
+        <p class="text-slate-500 text-sm mt-0.5">Année ${annee} · ${societes.length} société${societes.length > 1 ? 's' : ''}</p>
+      </div>
       <a href="#societes" class="btn-primary text-sm">+ Société</a>
     </div>
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-      ${cardsHtml}
+
+    ${globalKpis}
+    ${mensuelTable}
+
+    <h2 class="text-base font-semibold text-white mb-3">🏢 Mes sociétés</h2>
+    <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">
+      ${socCards}
     </div>
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <div class="bg-slate-800 rounded-xl border border-slate-700 p-4">
-        <h3 class="font-semibold text-white mb-3">Accès rapide</h3>
-        <div class="grid grid-cols-2 gap-3">
-          <a href="#ir" class="bg-slate-700 hover:bg-slate-600 rounded-lg p-3 text-center transition-colors">
-            <div class="text-2xl mb-1">📊</div>
-            <div class="text-sm text-slate-300">Simulateur IR</div>
-          </a>
-          <a href="#societes" class="bg-slate-700 hover:bg-slate-600 rounded-lg p-3 text-center transition-colors">
-            <div class="text-2xl mb-1">🏢</div>
-            <div class="text-sm text-slate-300">Mes sociétés</div>
-          </a>
-        </div>
-      </div>
-      ${lastSimHtml}
-    </div>
+
+    ${lastSimHtml}
   </div>`;
 }
 
