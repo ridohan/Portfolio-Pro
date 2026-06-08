@@ -1658,14 +1658,14 @@ function renderFiscalResultats(soc) {
   const scenInter = assietteInter > 0 ? calcScenariosIR(assietteInter, cfg) : null;
   const scenFin   = assietteFin   > 0 ? calcScenariosIR(assietteFin,   cfg) : null;
 
-  // Bloc delta : comparaison scénario par scénario vs la base courante
-  const renderDelta = (scenComp, scenBase, assietteComp, assietteBase) => {
+  // Bloc delta : comparaison scénario par scénario vs une base
+  const renderDelta = (scenComp, scenBase, assietteComp, assietteBase, label = 'Gain vs assiette courante') => {
     if (!scenComp || !scenBase) return '';
     const dBNC = assietteComp - assietteBase;
     return `
     <div class="mt-4 pt-4 border-t border-slate-600">
       <div class="flex items-baseline gap-3 mb-3">
-        <span class="text-xs text-slate-500 uppercase tracking-wide">Gain vs assiette courante</span>
+        <span class="text-xs text-slate-500 uppercase tracking-wide">${label}</span>
         <span class="text-xs text-slate-400">Δ BNC brut : <span class="${dBNC >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${dBNC >= 0 ? '+' : ''}${fmtE(dBNC)}</span></span>
       </div>
       <div class="grid grid-cols-3 gap-4">
@@ -1838,7 +1838,10 @@ function renderFiscalResultats(soc) {
   <div class="border-t border-slate-700 my-6"></div>
   ${renderBloc(assietteInter, '⏳ Assiette à court terme (confirmés + prévus prochainement)',   scenInter, renderDelta(scenInter, scenCour, assietteInter, assietteCour))}
   <div class="border-t border-slate-700 my-6"></div>
-  ${renderBloc(assietteFin,   `📅 Assiette prévisionnelle fin ${_bilanAnnee}`,                  scenFin,   renderDelta(scenFin,   scenCour, assietteFin,   assietteCour))}`;
+  ${renderBloc(assietteFin,   `📅 Assiette prévisionnelle fin ${_bilanAnnee}`,                  scenFin,
+    renderDelta(scenFin, scenCour,  assietteFin, assietteCour,  'Gain vs assiette courante') +
+    renderDelta(scenFin, scenInter, assietteFin, assietteInter, 'Gain vs assiette court terme')
+  )}`;
 }
 
 function renderSimuFiscale(soc) {
