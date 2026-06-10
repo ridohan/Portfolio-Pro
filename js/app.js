@@ -9,6 +9,7 @@ const STATE_DEFAULTS = {
   fiscal_configs: [],
   simulations_ir: [],
   exercices_fiscaux: [],
+  settings: {},
 };
 
 let STATE = { ...STATE_DEFAULTS };
@@ -302,6 +303,19 @@ function openSettings() {
           <div id="autosave-settings-block" class="flex flex-col gap-2">${_renderAutoSaveBlock()}</div>
         </div>
         <hr class="border-slate-700" />
+        <div>
+          <p class="text-slate-400 text-xs font-medium mb-2">🎁 Chèques cadeaux — plafond URSSAF</p>
+          <p class="text-slate-500 text-xs mb-2">5 % du PMSS par événement et par bénéficiaire. Mettre à jour chaque janvier.</p>
+          <div class="flex items-center gap-2">
+            <input type="number" id="settings-plafond-cadeaux" value="${getPlafondCadeaux()}"
+              min="1" max="9999" step="1"
+              class="input w-28 text-sm" />
+            <span class="text-slate-400 text-sm">€ / événement</span>
+            <button class="btn-primary text-xs px-3 py-1.5 ml-auto" onclick="savePlafondCadeaux()">Enregistrer</button>
+          </div>
+          <p class="text-slate-600 text-xs mt-1.5">2024 : 193 € · 2025 : 196 € · 2026 : 200 €</p>
+        </div>
+        <hr class="border-slate-700" />
         <button class="btn-danger text-sm w-full" onclick="resetData()">🗑 Réinitialiser toutes les données</button>
       </div>
       <div class="flex justify-end mt-5">
@@ -312,6 +326,16 @@ function openSettings() {
 }
 
 function closeSettings() { document.getElementById('settings-modal')?.remove(); }
+
+function savePlafondCadeaux() {
+  const val = parseInt(document.getElementById('settings-plafond-cadeaux')?.value, 10);
+  if (!val || val < 1) return;
+  STATE.settings = { ...(STATE.settings || {}), plafond_cheque_cadeaux: val };
+  saveState();
+  // Feedback visuel
+  const btn = document.querySelector('#settings-modal button[onclick="savePlafondCadeaux()"]');
+  if (btn) { btn.textContent = '✓ Enregistré'; btn.classList.add('opacity-60'); setTimeout(() => { btn.textContent = 'Enregistrer'; btn.classList.remove('opacity-60'); }, 1500); }
+}
 
 function exportData() {
   Storage.exportJSON(STATE);
@@ -1530,17 +1554,66 @@ function calcDepensesAnnee(societeId, annee) {
 
 // ─── BILAN — RENDU ───────────────────────────────────────────────────────────
 
-const CATS_DEPENSE = [
-  { value: 'salaire',    label: '👤 Salaire dirigeant / salarié' },
-  { value: 'loyer',      label: 'Loyer & charges locatives' },
-  { value: 'logiciel',   label: 'Logiciels & abonnements' },
-  { value: 'materiel',   label: 'Matériel & équipement' },
-  { value: 'deplacement',label: 'Déplacements & frais' },
-  { value: 'compta',     label: 'Comptabilité & juridique' },
-  { value: 'social',     label: 'Charges sociales TNS' },
-  { value: 'soustraitance', label: 'Sous-traitance' },
-  { value: 'autre',      label: 'Autre' },
+// Catégories avec groupes pour le <select>
+const CATS_DEPENSE_GROUPS = [
+  {
+    group: '👤 Rémunérations',
+    cats: [
+      { value: 'salaire',              label: 'Salaire dirigeant (TNS / assimilé-salarié)' },
+      { value: 'remuneration_salaries',label: 'Rémunération de vos salariés' },
+      { value: 'charges_sal_salaries', label: 'Charges sociales de vos salariés' },
+      { value: 'mutuelle_salaries',    label: 'Cotisations mutuelle de vos salariés' },
+      { value: 'retraite_salaries',    label: 'Cotisations caisse retraites de vos salariés' },
+      { value: 'cotis_facultatives',   label: 'Cotisations sociales facultatives / complémentaires (Dirigeant)' },
+      { value: 'social',               label: 'Charges sociales TNS' },
+    ],
+  },
+  {
+    group: '🏢 Charges fixes',
+    cats: [
+      { value: 'loyer',         label: 'Loyer & charges locatives' },
+      { value: 'assurance',     label: 'Assurance' },
+      { value: 'frais_bancaires', label: 'Frais bancaires' },
+      { value: 'compta',        label: 'Comptabilité & juridique' },
+    ],
+  },
+  {
+    group: '💻 Exploitation',
+    cats: [
+      { value: 'logiciel',      label: 'Logiciels & abonnements' },
+      { value: 'materiel',      label: 'Matériel & équipement' },
+      { value: 'deplacement',   label: 'Déplacements & frais' },
+      { value: 'restaurant',    label: 'Restaurant & frais de repas' },
+      { value: 'soustraitance', label: 'Sous-traitance' },
+    ],
+  },
+  {
+    group: '🎓 Formation & avantages salariés',
+    cats: [
+      { value: 'formation',        label: 'Formations & charges de personnel' },
+      { value: 'cheque_cadeaux',   label: 'Chèque cadeaux' },
+      { value: 'cheque_culture',   label: 'Chèque culture' },
+      { value: 'cheque_vacances',  label: 'Chèque vacances ANCV' },
+    ],
+  },
+  {
+    group: '📋 Taxes & impôts',
+    cats: [
+      { value: 'cfe',    label: 'CFE (Cotisation Foncière des Entreprises)' },
+      { value: 'is_dep', label: 'IS (Impôt sur les Sociétés)' },
+    ],
+  },
+  {
+    group: '📦 Autres',
+    cats: [
+      { value: 'autre', label: 'Autre' },
+    ],
+  },
 ];
+
+// Liste plate pour les lookups
+const CATS_DEPENSE = CATS_DEPENSE_GROUPS.flatMap(g => g.cats);
+const CAT_GROUP    = Object.fromEntries(CATS_DEPENSE_GROUPS.flatMap(g => g.cats.map(c => [c.value, g.group])));
 
 // Taux par défaut selon régime social (2024-2025)
 const SALAIRE_DEFAULTS = {
@@ -1711,7 +1784,9 @@ function renderSocBilan(soc) {
         }
         const labelSuffix = isSal
           ? ` <span class="text-slate-600 text-xs">(brut + charges pat.)</span>`
-          : '';
+          : dep.categorie === 'cheque_cadeaux' && dep.event
+            ? ` <span class="text-slate-600 text-xs">(${dep.event})</span>`
+            : '';
         return `<tr class="border-b border-slate-700/30 group">
           <td class="${TDL} bg-slate-800/20">
             <div class="flex items-center justify-between">
@@ -2668,6 +2743,53 @@ function openIRFromBilan(societeId, assiette) {
 
 // ─── DÉPENSES — CRUD ─────────────────────────────────────────────────────────
 
+// ─── CHÈQUES CADEAUX — PLAFOND URSSAF ────────────────────────────────────────
+// Plafond d'exonération : 5 % du PMSS par événement et par bénéficiaire.
+// Mettre à jour CHEQUE_CADEAUX_PLAFOND chaque année après publication du nouveau PMSS.
+//
+//  Année │ PMSS    │ 5 % PMSS (arrondi)
+//  ──────┼─────────┼───────────────────
+//  2024  │ 3 864 € │ 193 €
+//  2025  │ 3 925 € │ 196 €
+//  2026  │ 4 004 € │ 200 €   ← valeur actuelle
+//
+// Plafond lu depuis STATE.settings (persisté), sinon valeur par défaut 2026
+const CHEQUE_CADEAUX_PLAFOND_DEFAULT = 200;
+function getPlafondCadeaux() {
+  return (STATE.settings && STATE.settings.plafond_cheque_cadeaux) || CHEQUE_CADEAUX_PLAFOND_DEFAULT;
+}
+
+// Événements reconnus par l'URSSAF pour les chèques cadeaux (bons d'achat)
+// Le plafond est lu dynamiquement depuis STATE.settings.plafond_cheque_cadeaux
+function getChequesCadeauxEvents() {
+  const p = getPlafondCadeaux();
+  return [
+    { value: 'noel_salaries',     label: 'Noël — salariés',                         plafond: p, desc: `Plafond : ${p} € par salarié`,                               note: 'Tous salariés, sans condition d\'ancienneté. Cumulable avec Noël enfants.' },
+    { value: 'noel_enfants',      label: 'Noël — enfants du salarié (< 16 ans)',     plafond: p, desc: `Plafond : ${p} € par enfant de moins de 16 ans au 31/12`,      note: 'Distinct du bon Noël salarié. Un bon par enfant éligible.' },
+    { value: 'rentree_scolaire',  label: 'Rentrée scolaire',                         plafond: p, desc: `Plafond : ${p} € par enfant scolarisé (6 à 26 ans)`,           note: 'Enfant du salarié âgé de 6 à 26 ans, justificatif de scolarité requis.' },
+    { value: 'naissance_adoption',label: 'Naissance / Adoption',                     plafond: p, desc: `Plafond : ${p} € par événement`,                               note: 'Attribué à l\'occasion de la naissance ou adoption d\'un enfant.' },
+    { value: 'mariage_pacs',      label: 'Mariage / PACS',                           plafond: p, desc: `Plafond : ${p} € par événement`,                               note: 'Attribué à l\'occasion du mariage ou de la conclusion d\'un PACS.' },
+    { value: 'retraite',          label: 'Départ à la retraite',                     plafond: p, desc: `Plafond : ${p} € par événement`,                               note: 'Attribué au salarié lors de son départ en retraite ou préretraite.' },
+    { value: 'fete_meres',        label: 'Fête des mères',                           plafond: p, desc: `Plafond : ${p} € par salariée mère`,                           note: 'Réservé aux salariées ayant des enfants. Justificatif facultatif en pratique.' },
+    { value: 'fete_peres',        label: 'Fête des pères',                           plafond: p, desc: `Plafond : ${p} € par salarié père`,                            note: 'Réservé aux salariés ayant des enfants. Justificatif facultatif en pratique.' },
+    { value: 'handicap',          label: 'Journée des personnes handicapées',        plafond: p, desc: `Plafond : ${p} € par salarié concerné`,                        note: 'Attribué aux salariés reconnus travailleurs handicapés (RQTH).' },
+  ];
+}
+// Alias statique pour les endroits qui construisent le HTML au render (sera appelé au bon moment)
+const CHEQUE_CADEAUX_EVENTS = { get length() { return getChequesCadeauxEvents().length; }, map: (...a) => getChequesCadeauxEvents().map(...a), find: (...a) => getChequesCadeauxEvents().find(...a) };
+
+function _onEventChange() {
+  const val  = document.getElementById('dep-event')?.value;
+  const info = document.getElementById('dep-event-info');
+  if (!val || !info) return;
+  const evt = CHEQUE_CADEAUX_EVENTS.find(e => e.value === val);
+  if (!evt) { info.classList.add('hidden'); return; }
+  document.getElementById('dep-event-desc').textContent    = evt.desc;
+  document.getElementById('dep-event-plafond').textContent = `⚠️ Max URSSAF : ${evt.plafond} €`;
+  document.getElementById('dep-event-note').textContent    = evt.note;
+  info.classList.remove('hidden');
+}
+
 function openDepenseModal(societeId, depenseId) {
   const dep = depenseId ? (STATE.depenses || []).find(d => d.id === depenseId) : null;
   const now = new Date();
@@ -2677,14 +2799,16 @@ function openDepenseModal(societeId, depenseId) {
     mois_debut: { annee: now.getFullYear(), mois: now.getMonth() + 1 }, mois_fin: null,
   };
 
-  const catsOptions = CATS_DEPENSE.map(c =>
-    `<option value="${c.value}" ${v.categorie === c.value ? 'selected' : ''}>${c.label}</option>`
+  const catsOptions = CATS_DEPENSE_GROUPS.map(g =>
+    `<optgroup label="${g.group}">${g.cats.map(c =>
+      `<option value="${c.value}" ${v.categorie === c.value ? 'selected' : ''}>${c.label}</option>`
+    ).join('')}</optgroup>`
   ).join('');
 
   const periodOptions = [
     ['mensuelle','Mensuelle'],['trimestrielle','Trimestrielle'],
     ['semestrielle','Semestrielle'],['annuelle','Annuelle'],['ponctuelle','Ponctuelle (1 fois)'],
-  ].map(([val, lbl]) => `<option value="${val}" ${v.periodicite === val ? 'selected' : ''}>${lbl}</option>`).join('');
+  ].map(([val, lbl]) => `<option value="${val}" ${(v.periodicite || 'ponctuelle') === val ? 'selected' : ''}>${lbl}</option>`).join('');
 
   const isSalaire  = v.categorie === 'salaire';
   const regime     = v.regime_social || 'tns';
@@ -2722,6 +2846,24 @@ function openDepenseModal(societeId, depenseId) {
               </div>
               <input type="hidden" id="dep-tva-val" value="${v.tva_taux}" />
             </div>
+          </div>
+        </div>
+
+        <!-- Champ évènement (chèque cadeaux uniquement) -->
+        <div id="dep-event-field" class="${v.categorie === 'cheque_cadeaux' ? '' : 'hidden'}">
+          <label class="label">Évènement URSSAF *</label>
+          <select id="dep-event" class="input" onchange="_onEventChange()">
+            <option value="">— Choisir un évènement —</option>
+            ${CHEQUE_CADEAUX_EVENTS.map(e =>
+              `<option value="${e.value}" ${(v.event || '') === e.value ? 'selected' : ''}>${e.label} — plafond ${e.plafond} €</option>`
+            ).join('')}
+          </select>
+          <div id="dep-event-info" class="mt-2 p-2.5 bg-slate-700/40 rounded-lg text-xs hidden">
+            <div class="flex justify-between items-center">
+              <span class="text-slate-400" id="dep-event-desc"></span>
+              <span class="text-amber-400 font-semibold" id="dep-event-plafond"></span>
+            </div>
+            <p class="text-slate-600 mt-1" id="dep-event-note"></p>
           </div>
         </div>
 
@@ -2822,9 +2964,12 @@ function openDepenseModal(societeId, depenseId) {
 }
 
 function _onDepCatChange() {
-  const isSal = document.getElementById('dep-cat').value === 'salaire';
+  const cat   = document.getElementById('dep-cat').value;
+  const isSal = cat === 'salaire';
+  const isCadeaux = cat === 'cheque_cadeaux';
   document.getElementById('dep-std-fields').classList.toggle('hidden', isSal);
   document.getElementById('dep-salaire-fields').classList.toggle('hidden', !isSal);
+  document.getElementById('dep-event-field').classList.toggle('hidden', !isCadeaux);
   if (isSal) { _setSalaireRegime(document.getElementById('sal-regime')?.value || 'tns'); _updateSalairePreview(); }
 }
 
@@ -2910,6 +3055,11 @@ function saveDepense(id, societeId) {
   if (!debut) return alert('Le mois de début est obligatoire.');
 
   const categorie = document.getElementById('dep-cat').value;
+  // Validation chèque cadeaux : évènement obligatoire
+  if (categorie === 'cheque_cadeaux') {
+    const evt = document.getElementById('dep-event')?.value?.trim();
+    if (!evt) return alert('Veuillez préciser l\'évènement pour les chèques cadeaux.');
+  }
   const data = {
     id, societe_id: societeId,
     label, montant_ht: montant,
@@ -2918,6 +3068,7 @@ function saveDepense(id, societeId) {
     periodicite: document.getElementById('dep-perio').value,
     mois_debut:  debut,
     mois_fin:    _parseMonth(document.getElementById('dep-fin').value),
+    ...(categorie === 'cheque_cadeaux' ? { event: document.getElementById('dep-event')?.value?.trim() } : {}),
     actif: true,
     // Champs spécifiques salaire
     ...(categorie === 'salaire' ? (() => {
