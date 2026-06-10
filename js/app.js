@@ -3107,7 +3107,6 @@ function saveDepense(id, societeId) {
 
 // Édition inline d'un montant de dépense pour un mois précis
 function editDepenseMois(depId, societeId, annee, mois, td) {
-  // Éviter double-ouverture
   if (td.querySelector('input')) return;
   const dep = (STATE.depenses || []).find(d => d.id === depId);
   if (!dep) return;
@@ -3116,7 +3115,6 @@ function editDepenseMois(depId, societeId, annee, mois, td) {
     ? dep.montants_mois[key]
     : calcDepenseMois(dep, annee, mois);
 
-  // Remplacer le contenu par un input
   const prev = td.innerHTML;
   td.innerHTML = `<input type="number" min="0" step="1"
     value="${currentVal || ''}"
