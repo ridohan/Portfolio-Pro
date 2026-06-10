@@ -1527,6 +1527,31 @@ function calcDepensesAnnee(societeId, annee) {
   return { totalHT, totalTTC };
 }
 
+// Projection d'une dépense pour un mois futur : override si saisi, sinon moyenne des mois passés
+function calcDepenseMoisProjecte(dep, annee, mois, moisActuel) {
+  const key = `${annee}-${mois}`;
+  // Override explicite → toujours prioritaire
+  if (dep.montants_mois && dep.montants_mois[key] !== undefined) return dep.montants_mois[key];
+  // Salaire : montant fixe chaque mois
+  if (dep.categorie === 'salaire') return _salaireCoutSociete(dep);
+  // Mois passé sans override → 0 (pas de dépense saisie)
+  if (mois <= moisActuel) return 0;
+  // Mois futur → total des mois passés / nombre de mois écoulés
+  let sum = 0;
+  for (let m = 1; m <= moisActuel; m++) sum += calcDepenseMois(dep, annee, m);
+  return moisActuel > 0 ? Math.round(sum / moisActuel) : 0;
+}
+
+// Projection totale des dépenses sur l'année (réel passé + projection futur)
+function calcDepensesProjetees(societeId, annee, moisActuel) {
+  const deps = getDepenses(societeId);
+  let totalHT = 0;
+  deps.forEach(dep => {
+    for (let m = 1; m <= 12; m++) totalHT += calcDepenseMoisProjecte(dep, annee, m, moisActuel);
+  });
+  return totalHT;
+}
+
 // ─── BILAN — RENDU ───────────────────────────────────────────────────────────
 
 // Catégories avec groupes pour le <select>
@@ -1745,21 +1770,37 @@ function renderSocBilan(soc) {
 
   // ── Section DÉPENSES — groupées par catégorie ─────────────────────────────
   const caAnnuel = totEnc.caHT;
+  const depsProjetees = calcDepensesProjetees(soc.id, annee, annee === anneeCourante ? moisCourant : 12);
+  const resultatProjecte = assietteFin - depsProjetees;
+
   const renderDepRow = dep => {
     const isSal = dep.categorie === 'salaire';
     const cells = moisData.map(md => {
       const isCur = annee === anneeCourante && md.mois === moisCourant;
-      const ht  = calcDepenseMois(dep, annee, md.mois);
-      const net = isSal ? calcSalaireNetMois(dep, annee, md.mois) : 0;
+      const isFutur = annee === anneeCourante && md.mois > moisCourant;
       const key = `${annee}-${md.mois}`;
       const hasOverride = dep.montants_mois && dep.montants_mois[key] !== undefined;
-      return `<td class="${TD(isCur, 'bg-slate-800/20')} cursor-pointer hover:bg-slate-700/30 dep-cell"
+      const ht  = calcDepenseMois(dep, annee, md.mois);
+      const proj = isFutur && !hasOverride ? calcDepenseMoisProjecte(dep, annee, md.mois, moisCourant) : 0;
+      const net = isSal ? calcSalaireNetMois(dep, annee, md.mois) : 0;
+      // Styles selon l'état de la cellule
+      // - Réel passé    : rouge
+      // - Prévisionnel  : amber + badge "~" (mois futur saisi manuellement)
+      // - Projection auto : gris italique
+      const isPrevi = isFutur && hasOverride;
+      const cellBg  = isPrevi ? 'bg-amber-950/20' : 'bg-slate-800/20';
+      return `<td class="${TD(isCur, cellBg)} cursor-pointer hover:bg-slate-700/30 dep-cell"
           onclick="editDepenseMois('${dep.id}','${soc.id}',${annee},${md.mois},this)">
         <div class="flex flex-col items-center gap-0 pointer-events-none">
-          ${ht
-            ? `<span class="text-red-300${hasOverride ? ' underline decoration-dotted decoration-slate-500' : ''}">${fmtE(ht)}</span>
+          ${ht && !isPrevi
+            ? `<span class="text-red-300">${fmtE(ht)}</span>
                ${isSal ? `<span class="text-emerald-700 text-xs">net ${fmtE(net)}</span>` : ''}`
-            : `<span class="text-slate-800">—</span>`}
+            : isPrevi
+              ? `<span class="text-amber-400/80 text-xs font-medium">~${fmtE(ht)}</span>
+                 ${isSal ? `<span class="text-emerald-700 text-xs">net ${fmtE(net)}</span>` : ''}`
+              : proj
+                ? `<span class="text-slate-600 italic text-xs">${fmtE(proj)}</span>`
+                : `<span class="text-slate-800">—</span>`}
         </div>
       </td>`;
     }).join('');
@@ -1791,7 +1832,10 @@ function renderSocBilan(soc) {
         </div>
       </td>
       <td class="${COL_TOTAL} bg-slate-800/30 text-slate-400">
-        ${totD > 0 ? fmtE(Math.round(totD / Math.max(1, [...Array(12)].filter((_,i) => calcDepenseMois(dep, annee, i+1) > 0).length))) : '—'}
+        ${(() => {
+          const moisRef = annee === anneeCourante ? moisCourant : 12;
+          return totD > 0 ? fmtE(Math.round(totD / moisRef)) : '—';
+        })()}
       </td>
       <td class="${COL_TOTAL} bg-slate-800/30 ${caAnnuel > 0 && totD > 0 ? 'text-amber-400' : 'text-slate-600'}">
         ${caAnnuel > 0 && totD > 0 ? (totD / caAnnuel * 100).toFixed(1) + ' %' : '—'}
@@ -1874,16 +1918,36 @@ function renderSocBilan(soc) {
   </div>`;
 
   const kpis = `
-  <div class="grid grid-cols-3 gap-3 mb-5">
+  <div class="grid grid-cols-4 gap-3 mb-5">
     ${kpiCard('✅', 'Assiette courante', 'Paiements ✓ confirmés', assietteCourante, resultatCourant, 'border-emerald-800/50')}
     ${kpiCard('⏳', 'Assiette à court terme', 'Confirmés + ⏳ prévus prochainement', assietteInter, resultatInter, 'border-blue-700/40',
       assietteInter > assietteCourante
         ? `<div class="mt-2 text-blue-600 text-xs">+ ${fmtE(assietteInter - assietteCourante)} prévu prochainement</div>`
         : ''
     )}
-    ${kpiCard('📅', `Fin ${annee}`, 'Prévisionnel complet', assietteFin, resultatFin, 'border-slate-600',
-      '<div class="mt-2 text-slate-600 text-xs">avant charges sociales & impôts</div>'
+    ${kpiCard('📅', `Fin ${annee} (CA)`, 'Prévisionnel CA complet', assietteFin, resultatFin, 'border-slate-600',
+      '<div class="mt-2 text-slate-600 text-xs">dépenses saisies uniquement</div>'
     )}
+    <div class="bg-slate-800 border border-violet-700/40 rounded-xl p-4">
+      <div class="text-slate-400 text-xs uppercase tracking-wide font-medium mb-3">📊 Projection fin ${annee}</div>
+      <div class="flex items-end justify-between mb-3">
+        <div>
+          <div class="text-white font-bold text-2xl">${fmtE(assietteFin)}</div>
+          <div class="text-slate-500 text-xs mt-0.5">CA prévisionnel</div>
+        </div>
+        <div class="text-right">
+          <div class="text-red-400 text-sm font-medium">− ${fmtE(depsProjetees)}</div>
+          <div class="text-slate-500 text-xs">dép. projetées</div>
+        </div>
+      </div>
+      <div class="pt-3 border-t border-slate-700 flex items-center justify-between">
+        <span class="text-slate-400 text-xs">Résultat projeté</span>
+        <span class="${resultatProjecte >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold">${fmtE(resultatProjecte)}</span>
+      </div>
+      ${depsProjetees > totDeps.totalHT
+        ? `<div class="mt-2 text-violet-500 text-xs">~${fmtE(depsProjetees - totDeps.totalHT)} de dépenses projetées non saisies</div>`
+        : '<div class="mt-2 text-slate-600 text-xs">basé sur la moyenne des mois passés</div>'}
+    </div>
   </div>`;
 
   // ── Légende statuts ──────────────────────────────────────────────────────
@@ -1911,17 +1975,17 @@ function renderSocBilan(soc) {
       ${thead}
       <tbody>
         <tr class="bg-slate-700/60 border-b border-slate-500">
-          <td colspan="14" class="px-3 py-1 text-xs font-bold text-emerald-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Revenus</td>
+          <td colspan="16" class="px-3 py-1 text-xs font-bold text-emerald-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Revenus</td>
         </tr>
-        ${missions.length > 0 ? missionEncRows : `<tr><td colspan="14" class="px-6 py-3 text-slate-600 text-xs italic">Aucune mission active</td></tr>`}
+        ${missions.length > 0 ? missionEncRows : `<tr><td colspan="16" class="px-6 py-3 text-slate-600 text-xs italic">Aucune mission active</td></tr>`}
         ${revenusRow}
         <tr class="bg-slate-700/60 border-b border-slate-500">
-          <td colspan="14" class="px-3 py-1 text-xs font-bold text-red-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Dépenses</td>
+          <td colspan="16" class="px-3 py-1 text-xs font-bold text-red-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Dépenses</td>
         </tr>
         ${depRows}
         ${depTotRow}
         <tr class="bg-slate-700/60 border-b border-slate-500">
-          <td colspan="14" class="px-3 py-1 text-xs font-bold text-slate-300 uppercase tracking-wider sticky left-0 bg-slate-700/60">Résultat</td>
+          <td colspan="16" class="px-3 py-1 text-xs font-bold text-slate-300 uppercase tracking-wider sticky left-0 bg-slate-700/60">Résultat</td>
         </tr>
         ${resultatRow}
       </tbody>
