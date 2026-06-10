@@ -1424,6 +1424,11 @@ function getDepenses(societeId) {
 
 // Retourne le montant HT de la dépense pour un mois/année donné (0 si hors période ou hors cycle)
 function calcDepenseMois(dep, annee, mois) {
+  // Montant saisi manuellement pour ce mois précis (override inline) ?
+  const overrideKey = `${annee}-${mois}`;
+  if (dep.montants_mois && dep.montants_mois[overrideKey] !== undefined) {
+    return dep.montants_mois[overrideKey];
+  }
   // Vérifier période active
   if (dep.mois_debut) {
     if (annee < dep.mois_debut.annee) return 0;
@@ -1769,11 +1774,14 @@ function renderSocBilan(soc) {
           const isCur = annee === anneeCourante && md.mois === moisCourant;
           const ht  = calcDepenseMois(dep, annee, md.mois);
           const net = isSal ? calcSalaireNetMois(dep, annee, md.mois) : 0;
-          if (!ht) return `<td class="${TD(isCur, 'bg-slate-800/20')}"><span class="text-slate-800">—</span></td>`;
-          return `<td class="${TD(isCur, 'bg-slate-800/20')}">
-            <div class="flex flex-col items-center gap-0">
-              <span class="text-red-300">${fmtE(ht)}</span>
-              ${isSal ? `<span class="text-emerald-700 text-xs">net ${fmtE(net)}</span>` : ''}
+          const hasOverride = dep.montants_mois && dep.montants_mois[md.mois] !== undefined;
+          return `<td class="${TD(isCur, 'bg-slate-800/20')} cursor-pointer hover:bg-slate-700/30 dep-cell"
+              onclick="editDepenseMois('${dep.id}','${soc.id}',${annee},${md.mois},this)">
+            <div class="flex flex-col items-center gap-0 pointer-events-none">
+              ${ht
+                ? `<span class="text-red-300${hasOverride ? ' underline decoration-dotted decoration-slate-500' : ''}">${fmtE(ht)}</span>
+                   ${isSal ? `<span class="text-emerald-700 text-xs">net ${fmtE(net)}</span>` : ''}`
+                : `<span class="text-slate-800">—</span>`}
             </div>
           </td>`;
         }).join('');
@@ -3095,6 +3103,49 @@ function saveDepense(id, societeId) {
   closeDepenseModal();
   _socTab = 'bilan';
   renderSocieteDetail(document.getElementById('app'), societeId);
+}
+
+// Édition inline d'un montant de dépense pour un mois précis
+function editDepenseMois(depId, societeId, annee, mois, td) {
+  // Éviter double-ouverture
+  if (td.querySelector('input')) return;
+  const dep = (STATE.depenses || []).find(d => d.id === depId);
+  if (!dep) return;
+  const key = `${annee}-${mois}`;
+  const currentVal = dep.montants_mois?.[key] !== undefined
+    ? dep.montants_mois[key]
+    : calcDepenseMois(dep, annee, mois);
+
+  // Remplacer le contenu par un input
+  const prev = td.innerHTML;
+  td.innerHTML = `<input type="number" min="0" step="1"
+    value="${currentVal || ''}"
+    placeholder="0"
+    class="w-16 bg-slate-900 border border-amber-500 rounded px-1 py-0.5 text-center text-amber-300 text-xs outline-none"
+    onclick="event.stopPropagation()" />`;
+  const input = td.querySelector('input');
+  input.focus();
+  input.select();
+
+  const save = () => {
+    const raw = parseFloat(input.value);
+    const val = isNaN(raw) ? 0 : Math.round(raw);
+    dep.montants_mois = dep.montants_mois || {};
+    if (val === 0) {
+      delete dep.montants_mois[key];
+      if (Object.keys(dep.montants_mois).length === 0) delete dep.montants_mois;
+    } else {
+      dep.montants_mois[key] = val;
+    }
+    saveState();
+    renderSocieteDetail(document.getElementById('app'), societeId);
+  };
+
+  input.addEventListener('blur', save);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { td.innerHTML = prev; }
+  });
 }
 
 function deleteDepense(id, societeId) {
