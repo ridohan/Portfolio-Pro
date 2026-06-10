@@ -1422,60 +1422,30 @@ function getDepenses(societeId) {
   return (STATE.depenses || []).filter(d => d.societe_id === societeId && d.actif !== false);
 }
 
-// Retourne le montant HT de la dépense pour un mois/année donné (0 si hors période ou hors cycle)
+// Retourne le montant HT de la dépense pour un mois/année donné
+// Modèle : montants_mois[annee-mois] pour les dépenses normales, montant_ht chaque mois pour les salaires
 function calcDepenseMois(dep, annee, mois) {
-  // Montant saisi manuellement pour ce mois précis (override inline) ?
-  const overrideKey = `${annee}-${mois}`;
-  if (dep.montants_mois && dep.montants_mois[overrideKey] !== undefined) {
-    return dep.montants_mois[overrideKey];
+  const key = `${annee}-${mois}`;
+  if (dep.montants_mois && dep.montants_mois[key] !== undefined) {
+    return dep.montants_mois[key];
   }
-  // Vérifier période active
-  if (dep.mois_debut) {
-    if (annee < dep.mois_debut.annee) return 0;
-    if (annee === dep.mois_debut.annee && mois < dep.mois_debut.mois) return 0;
-  }
-  if (dep.mois_fin) {
-    if (annee > dep.mois_fin.annee) return 0;
-    if (annee === dep.mois_fin.annee && mois > dep.mois_fin.mois) return 0;
-  }
-  const startMois = dep.mois_debut?.mois || 1;
-  // Pour les salaires : coût société = rémunération + cotisations (TNS ou patronales)
-  const montant = dep.categorie === 'salaire' ? _salaireCoutSociete(dep) : dep.montant_ht;
-  switch (dep.periodicite) {
-    case 'mensuelle':      return montant;
-    case 'trimestrielle':  return ((mois - startMois + 12) % 3  === 0) ? montant : 0;
-    case 'semestrielle':   return ((mois - startMois + 12) % 6  === 0) ? montant : 0;
-    case 'annuelle':       return mois === startMois             ? montant : 0;
-    case 'ponctuelle':
-      return (dep.mois_debut && dep.mois_debut.annee === annee && dep.mois_debut.mois === mois)
-        ? montant : 0;
-    default: return 0;
-  }
+  // Les salaires n'ont pas de montants_mois : montant_ht s'applique chaque mois
+  if (dep.categorie === 'salaire') return _salaireCoutSociete(dep);
+  return 0;
 }
 
 // Retourne le salaire net perçu pour un mois donné
 function calcSalaireNetMois(dep, annee, mois) {
   if (dep.categorie !== 'salaire') return 0;
-  const net = _salaireNetMensuel(dep);
-  // Réutilise la même logique de périodicité mais sur le net
-  if (dep.mois_debut) {
-    if (annee < dep.mois_debut.annee) return 0;
-    if (annee === dep.mois_debut.annee && mois < dep.mois_debut.mois) return 0;
+  const key = `${annee}-${mois}`;
+  // Si un override existe sur le coût société pour ce mois, on restitue le net proportionnel
+  if (dep.montants_mois && dep.montants_mois[key] !== undefined) {
+    const cout = dep.montants_mois[key];
+    if (!cout) return 0;
+    const ratio = _salaireNetMensuel(dep) / (_salaireCoutSociete(dep) || 1);
+    return Math.round(cout * ratio);
   }
-  if (dep.mois_fin) {
-    if (annee > dep.mois_fin.annee) return 0;
-    if (annee === dep.mois_fin.annee && mois > dep.mois_fin.mois) return 0;
-  }
-  const startMois = dep.mois_debut?.mois || 1;
-  switch (dep.periodicite) {
-    case 'mensuelle':     return net;
-    case 'trimestrielle': return ((mois - startMois + 12) % 3 === 0) ? net : 0;
-    case 'semestrielle':  return ((mois - startMois + 12) % 6 === 0) ? net : 0;
-    case 'annuelle':      return mois === startMois ? net : 0;
-    case 'ponctuelle':
-      return (dep.mois_debut && dep.mois_debut.annee === annee && dep.mois_debut.mois === mois) ? net : 0;
-    default: return 0;
-  }
+  return _salaireNetMensuel(dep);
 }
 
 // Encaissements prévisionnels pour un mois/année (CA facturé décalé du délai de paiement)
@@ -1569,6 +1539,7 @@ const CATS_DEPENSE_GROUPS = [
       { value: 'charges_sal_salaries', label: 'Charges sociales de vos salariés' },
       { value: 'mutuelle_salaries',    label: 'Cotisations mutuelle de vos salariés' },
       { value: 'retraite_salaries',    label: 'Cotisations caisse retraites de vos salariés' },
+      { value: 'prevoyance_salaries',  label: 'Cotisations prévoyance de vos salariés' },
       { value: 'cotis_facultatives',   label: 'Cotisations sociales facultatives / complémentaires (Dirigeant)' },
       { value: 'social',               label: 'Charges sociales TNS' },
     ],
@@ -1598,7 +1569,8 @@ const CATS_DEPENSE_GROUPS = [
       { value: 'formation',        label: 'Formations & charges de personnel' },
       { value: 'cheque_cadeaux',   label: 'Chèque cadeaux' },
       { value: 'cheque_culture',   label: 'Chèque culture' },
-      { value: 'cheque_vacances',  label: 'Chèque vacances ANCV' },
+      { value: 'cheque_vacances',   label: 'Chèque vacances ANCV' },
+      { value: 'tickets_restaurant', label: 'Tickets restaurant' },
     ],
   },
   {
@@ -1688,6 +1660,8 @@ function renderSocBilan(soc) {
       <th class="${TDL} bg-slate-700 text-slate-400 font-medium"></th>
       ${moisLabels.map((l, i) => `<th class="${TH(annee === anneeCourante && i+1 === moisCourant)}">${l}</th>`).join('')}
       <th class="${COL_TOTAL} bg-slate-600 text-white min-w-[105px]">Total ${annee}</th>
+      <th class="${COL_TOTAL} bg-slate-700 text-slate-400 min-w-[80px]">Moy./mois</th>
+      <th class="${COL_TOTAL} bg-slate-700 text-slate-400 min-w-[70px]">% CA</th>
     </tr>
   </thead>`;
 
@@ -1742,6 +1716,8 @@ function renderSocBilan(soc) {
         ${totAttendu > 0 ? `<div class="text-slate-400">${fmtE(totAttendu)}</div>` : ''}
         ${totM === 0 ? '<span class="text-slate-700">—</span>' : ''}
       </td>
+      <td class="${COL_TOTAL} bg-slate-800/20"></td>
+      <td class="${COL_TOTAL} bg-slate-800/20"></td>
     </tr>`;
   }).join('');
 
@@ -1763,57 +1739,85 @@ function renderSocBilan(soc) {
       <div class="text-emerald-300 font-bold">${fmtE(totEnc.caHT)}</div>
       ${totEnc.recuHT > 0 ? `<div class="text-emerald-500 text-xs">dont ✓ ${fmtE(totEnc.recuHT)}</div>` : ''}
     </td>
+    <td class="${COL_TOTAL} bg-slate-800/20"></td>
+    <td class="${COL_TOTAL} bg-slate-800/20"></td>
   </tr>`;
 
-  // ── Section DÉPENSES ─────────────────────────────────────────────────────
-  const depRows = depenses.length === 0
-    ? `<tr><td colspan="14" class="px-3 py-4 text-center text-slate-600 text-xs italic">Aucune dépense — cliquez sur "+ Ajouter une dépense"</td></tr>`
-    : depenses.map(dep => {
-        const isSal = dep.categorie === 'salaire';
-        const cells = moisData.map(md => {
-          const isCur = annee === anneeCourante && md.mois === moisCourant;
-          const ht  = calcDepenseMois(dep, annee, md.mois);
-          const net = isSal ? calcSalaireNetMois(dep, annee, md.mois) : 0;
-          const hasOverride = dep.montants_mois && dep.montants_mois[md.mois] !== undefined;
-          return `<td class="${TD(isCur, 'bg-slate-800/20')} cursor-pointer hover:bg-slate-700/30 dep-cell"
-              onclick="editDepenseMois('${dep.id}','${soc.id}',${annee},${md.mois},this)">
-            <div class="flex flex-col items-center gap-0 pointer-events-none">
-              ${ht
-                ? `<span class="text-red-300${hasOverride ? ' underline decoration-dotted decoration-slate-500' : ''}">${fmtE(ht)}</span>
-                   ${isSal ? `<span class="text-emerald-700 text-xs">net ${fmtE(net)}</span>` : ''}`
-                : `<span class="text-slate-800">—</span>`}
-            </div>
-          </td>`;
-        }).join('');
-        let totD = 0, totNet = 0;
-        for (let m = 1; m <= 12; m++) {
-          totD   += calcDepenseMois(dep, annee, m);
-          totNet += isSal ? calcSalaireNetMois(dep, annee, m) : 0;
-        }
-        const labelSuffix = isSal
-          ? ` <span class="text-slate-600 text-xs">(brut + charges pat.)</span>`
-          : dep.categorie === 'cheque_cadeaux' && dep.event
-            ? ` <span class="text-slate-600 text-xs">(${dep.event})</span>`
-            : '';
-        return `<tr class="border-b border-slate-700/30 group">
-          <td class="${TDL} bg-slate-800/20">
-            <div class="flex items-center justify-between">
-              <span class="text-slate-400">${dep.label}${labelSuffix} <span class="text-slate-700">${_perioLabel(dep.periodicite)}</span></span>
-              <div class="hidden group-hover:flex gap-1 ml-2 shrink-0">
-                <button onclick="openDepenseModal('${soc.id}','${dep.id}')" class="text-slate-500 hover:text-white text-xs">✏</button>
-                <button onclick="deleteDepense('${dep.id}','${soc.id}')" class="text-red-800 hover:text-red-400 text-xs ml-1">✕</button>
-              </div>
-            </div>
-          </td>
-          ${cells}
-          <td class="${COL_TOTAL} bg-slate-700/30">
-            <div class="flex flex-col items-center gap-0">
-              <span class="text-red-300">${totD > 0 ? fmtE(totD) : '—'}</span>
-              ${isSal && totNet > 0 ? `<span class="text-emerald-700 text-xs">net ${fmtE(totNet)}</span>` : ''}
-            </div>
-          </td>
-        </tr>`;
-      }).join('');
+  // ── Section DÉPENSES — groupées par catégorie ─────────────────────────────
+  const caAnnuel = totEnc.caHT;
+  const renderDepRow = dep => {
+    const isSal = dep.categorie === 'salaire';
+    const cells = moisData.map(md => {
+      const isCur = annee === anneeCourante && md.mois === moisCourant;
+      const ht  = calcDepenseMois(dep, annee, md.mois);
+      const net = isSal ? calcSalaireNetMois(dep, annee, md.mois) : 0;
+      const key = `${annee}-${md.mois}`;
+      const hasOverride = dep.montants_mois && dep.montants_mois[key] !== undefined;
+      return `<td class="${TD(isCur, 'bg-slate-800/20')} cursor-pointer hover:bg-slate-700/30 dep-cell"
+          onclick="editDepenseMois('${dep.id}','${soc.id}',${annee},${md.mois},this)">
+        <div class="flex flex-col items-center gap-0 pointer-events-none">
+          ${ht
+            ? `<span class="text-red-300${hasOverride ? ' underline decoration-dotted decoration-slate-500' : ''}">${fmtE(ht)}</span>
+               ${isSal ? `<span class="text-emerald-700 text-xs">net ${fmtE(net)}</span>` : ''}`
+            : `<span class="text-slate-800">—</span>`}
+        </div>
+      </td>`;
+    }).join('');
+    let totD = 0, totNet = 0;
+    for (let m = 1; m <= 12; m++) {
+      totD   += calcDepenseMois(dep, annee, m);
+      totNet += isSal ? calcSalaireNetMois(dep, annee, m) : 0;
+    }
+    const labelSuffix = isSal
+      ? ` <span class="text-slate-600 text-xs">(brut + charges pat.)</span>`
+      : dep.categorie === 'cheque_cadeaux' && dep.event
+        ? ` <span class="text-slate-600 text-xs">(${dep.event})</span>`
+        : '';
+    return `<tr class="border-b border-slate-700/30 group">
+      <td class="${TDL} bg-slate-800/20">
+        <div class="flex items-center justify-between">
+          <span class="text-slate-400">${dep.label}${labelSuffix}</span>
+          <div class="hidden group-hover:flex gap-1 ml-2 shrink-0">
+            <button onclick="openDepenseModal('${soc.id}','${dep.id}')" class="text-slate-500 hover:text-white text-xs">✏</button>
+            <button onclick="deleteDepense('${dep.id}','${soc.id}')" class="text-red-800 hover:text-red-400 text-xs ml-1">✕</button>
+          </div>
+        </div>
+      </td>
+      ${cells}
+      <td class="${COL_TOTAL} bg-slate-700/30">
+        <div class="flex flex-col items-center gap-0">
+          <span class="text-red-300">${totD > 0 ? fmtE(totD) : '—'}</span>
+          ${isSal && totNet > 0 ? `<span class="text-emerald-700 text-xs">net ${fmtE(totNet)}</span>` : ''}
+        </div>
+      </td>
+      <td class="${COL_TOTAL} bg-slate-800/30 text-slate-400">
+        ${totD > 0 ? fmtE(Math.round(totD / Math.max(1, [...Array(12)].filter((_,i) => calcDepenseMois(dep, annee, i+1) > 0).length))) : '—'}
+      </td>
+      <td class="${COL_TOTAL} bg-slate-800/30 ${caAnnuel > 0 && totD > 0 ? 'text-amber-400' : 'text-slate-600'}">
+        ${caAnnuel > 0 && totD > 0 ? (totD / caAnnuel * 100).toFixed(1) + ' %' : '—'}
+      </td>
+    </tr>`;
+  };
+
+  const depRows = (() => {
+    if (depenses.length === 0)
+      return `<tr><td colspan="16" class="px-3 py-4 text-center text-slate-600 text-xs italic">Aucune dépense — cliquez sur "+ Ajouter une dépense"</td></tr>`;
+    let html = '';
+    CATS_DEPENSE_GROUPS.forEach(grp => {
+      const grpDeps = depenses.filter(d => grp.cats.some(c => c.value === d.categorie));
+      if (grpDeps.length === 0) return;
+      html += `<tr><td colspan="16" class="px-3 py-1.5 text-xs font-semibold text-slate-500 bg-slate-800/50 tracking-wide">${grp.group}</td></tr>`;
+      html += grpDeps.map(renderDepRow).join('');
+    });
+    // Dépenses dont la catégorie ne correspond à aucun groupe (données legacy)
+    const known = new Set(CATS_DEPENSE_GROUPS.flatMap(g => g.cats.map(c => c.value)));
+    const orphans = depenses.filter(d => !known.has(d.categorie));
+    if (orphans.length) {
+      html += `<tr><td colspan="16" class="px-3 py-1.5 text-xs font-semibold text-slate-500 bg-slate-800/50">📦 Autres</td></tr>`;
+      html += orphans.map(renderDepRow).join('');
+    }
+    return html;
+  })();
 
   const depTotRow = `
   <tr class="border-b border-slate-500">
@@ -1825,6 +1829,8 @@ function renderSocBilan(soc) {
       </td>`;
     }).join('')}
     <td class="${COL_TOTAL} bg-red-900/40 text-red-300 font-bold">${totDeps.totalHT > 0 ? fmtE(totDeps.totalHT) : '—'}</td>
+    <td class="${COL_TOTAL} bg-slate-800/30"></td>
+    <td class="${COL_TOTAL} bg-slate-800/30"></td>
   </tr>`;
 
   // ── Section RÉSULTAT ─────────────────────────────────────────────────────
@@ -1842,6 +1848,8 @@ function renderSocBilan(soc) {
     <td class="${COL_TOTAL} bg-slate-600">
       <span class="${resultatFin > 0 ? 'text-emerald-400' : 'text-red-400'} font-bold text-sm">${fmtE(resultatFin)}</span>
     </td>
+    <td class="${COL_TOTAL} bg-slate-700"></td>
+    <td class="${COL_TOTAL} bg-slate-700"></td>
   </tr>`;
 
   // ── KPIs ─────────────────────────────────────────────────────────────────
@@ -1939,37 +1947,14 @@ function renderRemunerations(soc, annee) {
     let totNet = 0, totCout = 0, totCotis = 0;
     for (let m = 1; m <= 12; m++) {
       const net  = calcSalaireNetMois(dep, annee, m);
-      const cout = (() => {
-        // Récupère le coût brut pour ce mois (même logique périodicité que calcDepenseMois)
-        if (dep.mois_debut) {
-          if (annee < dep.mois_debut.annee || (annee === dep.mois_debut.annee && m < dep.mois_debut.mois)) return 0;
-        }
-        if (dep.mois_fin) {
-          if (annee > dep.mois_fin.annee || (annee === dep.mois_fin.annee && m > dep.mois_fin.mois)) return 0;
-        }
-        return net > 0 ? _salaireCoutSociete(dep) : 0;
-      })();
-      totNet  += net;
-      totCout += cout;
+      const cout = calcDepenseMois(dep, annee, m);
+      totNet   += net;
+      totCout  += cout;
       totCotis += Math.max(0, cout - net);
     }
-    // Pour assimilé-salarié : brut = montant_ht × nb mois actifs
     const totBrut = isTNS ? totNet : (() => {
       let b = 0;
-      for (let m = 1; m <= 12; m++) {
-        if (dep.mois_debut) { if (annee < dep.mois_debut.annee || (annee === dep.mois_debut.annee && m < dep.mois_debut.mois)) continue; }
-        if (dep.mois_fin)   { if (annee > dep.mois_fin.annee   || (annee === dep.mois_fin.annee   && m > dep.mois_fin.mois))   continue; }
-        const sm = dep.mois_debut?.mois || 1;
-        let ok = false;
-        switch (dep.periodicite) {
-          case 'mensuelle':     ok = true; break;
-          case 'trimestrielle': ok = ((m - sm + 12) % 3 === 0); break;
-          case 'semestrielle':  ok = ((m - sm + 12) % 6 === 0); break;
-          case 'annuelle':      ok = (m === sm); break;
-          case 'ponctuelle':    ok = (dep.mois_debut?.annee === annee && dep.mois_debut?.mois === m); break;
-        }
-        if (ok) b += dep.montant_ht;
-      }
+      for (let m = 1; m <= 12; m++) b += calcDepenseMois(dep, annee, m) > 0 ? dep.montant_ht : 0;
       return b;
     })();
     return { dep, isTNS, totNet, totCout, totCotis, totBrut };
@@ -2800,11 +2785,9 @@ function _onEventChange() {
 
 function openDepenseModal(societeId, depenseId) {
   const dep = depenseId ? (STATE.depenses || []).find(d => d.id === depenseId) : null;
-  const now = new Date();
   const v = dep || {
     id: uid(), societe_id: societeId, label: '', montant_ht: '', tva_taux: 0.20,
-    categorie: 'logiciel', periodicite: 'mensuelle', actif: true,
-    mois_debut: { annee: now.getFullYear(), mois: now.getMonth() + 1 }, mois_fin: null,
+    categorie: 'logiciel', actif: true,
   };
 
   const catsOptions = CATS_DEPENSE_GROUPS.map(g =>
@@ -2812,11 +2795,6 @@ function openDepenseModal(societeId, depenseId) {
       `<option value="${c.value}" ${v.categorie === c.value ? 'selected' : ''}>${c.label}</option>`
     ).join('')}</optgroup>`
   ).join('');
-
-  const periodOptions = [
-    ['mensuelle','Mensuelle'],['trimestrielle','Trimestrielle'],
-    ['semestrielle','Semestrielle'],['annuelle','Annuelle'],['ponctuelle','Ponctuelle (1 fois)'],
-  ].map(([val, lbl]) => `<option value="${val}" ${(v.periodicite || 'ponctuelle') === val ? 'selected' : ''}>${lbl}</option>`).join('');
 
   const isSalaire  = v.categorie === 'salaire';
   const regime     = v.regime_social || 'tns';
@@ -2845,15 +2823,19 @@ function openDepenseModal(societeId, depenseId) {
               <input id="dep-montant" class="input" type="number" min="0" step="0.01" value="${!isSalaire ? montantVal : ''}" placeholder="0" />
             </div>
             <div>
-              <label class="label">TVA applicable</label>
-              <div class="flex gap-2 mt-1">
-                <button id="dep-tva-oui" onclick="document.getElementById('dep-tva-val').value='0.20';document.getElementById('dep-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('dep-tva-non').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
-                  class="flex-1 text-xs py-1.5 rounded ${v.tva_taux > 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">20%</button>
-                <button id="dep-tva-non" onclick="document.getElementById('dep-tva-val').value='0';document.getElementById('dep-tva-non').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('dep-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
-                  class="flex-1 text-xs py-1.5 rounded ${v.tva_taux === 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">Non</button>
-              </div>
-              <input type="hidden" id="dep-tva-val" value="${v.tva_taux}" />
+              <label class="label">Mois *</label>
+              <input id="dep-mois" class="input" type="month" value="${(() => { const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`; })()}" />
             </div>
+          </div>
+          <div>
+            <label class="label">TVA applicable</label>
+            <div class="flex gap-2 mt-1">
+              <button id="dep-tva-oui" onclick="document.getElementById('dep-tva-val').value='0.20';document.getElementById('dep-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('dep-tva-non').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
+                class="flex-1 text-xs py-1.5 rounded ${v.tva_taux > 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">20%</button>
+              <button id="dep-tva-non" onclick="document.getElementById('dep-tva-val').value='0';document.getElementById('dep-tva-non').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('dep-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
+                class="flex-1 text-xs py-1.5 rounded ${v.tva_taux === 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}">Non</button>
+            </div>
+            <input type="hidden" id="dep-tva-val" value="${v.tva_taux}" />
           </div>
         </div>
 
@@ -2947,20 +2929,6 @@ function openDepenseModal(societeId, depenseId) {
           <input type="hidden" id="dep-tva-val" value="0" />
         </div>
 
-        <div>
-          <label class="label">Périodicité</label>
-          <select id="dep-perio" class="input">${periodOptions}</select>
-        </div>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="label">Mois de début *</label>
-            <input id="dep-debut" class="input" type="month" value="${v.mois_debut ? v.mois_debut.annee+'-'+String(v.mois_debut.mois).padStart(2,'0') : ''}" />
-          </div>
-          <div>
-            <label class="label">Mois de fin (optionnel)</label>
-            <input id="dep-fin" class="input" type="month" value="${v.mois_fin ? v.mois_fin.annee+'-'+String(v.mois_fin.mois).padStart(2,'0') : ''}" />
-          </div>
-        </div>
       </div>
       <div class="flex gap-3 mt-5">
         <button class="btn-primary flex-1" onclick="saveDepense('${v.id}','${societeId}')">Enregistrer</button>
@@ -3059,23 +3027,29 @@ function saveDepense(id, societeId) {
   const montant = parseFloat(document.getElementById('dep-montant').value);
   if (!label) return alert('Le libellé est obligatoire.');
   if (!montant || montant <= 0) return alert('Le montant doit être supérieur à 0.');
-  const debut = _parseMonth(document.getElementById('dep-debut').value);
-  if (!debut) return alert('Le mois de début est obligatoire.');
-
   const categorie = document.getElementById('dep-cat').value;
   // Validation chèque cadeaux : évènement obligatoire
   if (categorie === 'cheque_cadeaux') {
     const evt = document.getElementById('dep-event')?.value?.trim();
     if (!evt) return alert('Veuillez préciser l\'évènement pour les chèques cadeaux.');
   }
+  // Pour les dépenses non-salaire : stocker le montant dans montants_mois[annee-mois]
+  // Conserver les montants_mois existants si on édite une dépense existante
+  const existing = (STATE.depenses || []).find(d => d.id === id);
+  let montants_mois = (existing ? { ...(existing.montants_mois || {}) } : {});
+  if (categorie !== 'salaire') {
+    const moisVal = document.getElementById('dep-mois')?.value; // "YYYY-MM"
+    if (moisVal) {
+      const [y, m] = moisVal.split('-').map(Number);
+      montants_mois[`${y}-${m}`] = montant;
+    }
+  }
   const data = {
     id, societe_id: societeId,
     label, montant_ht: montant,
     tva_taux:    parseFloat(document.getElementById('dep-tva-val').value) || 0,
     categorie,
-    periodicite: document.getElementById('dep-perio').value,
-    mois_debut:  debut,
-    mois_fin:    _parseMonth(document.getElementById('dep-fin').value),
+    montants_mois: Object.keys(montants_mois).length ? montants_mois : undefined,
     ...(categorie === 'cheque_cadeaux' ? { event: document.getElementById('dep-event')?.value?.trim() } : {}),
     actif: true,
     // Champs spécifiques salaire
@@ -3126,14 +3100,15 @@ function editDepenseMois(depId, societeId, annee, mois, td) {
   input.select();
 
   const save = () => {
-    const raw = parseFloat(input.value);
-    const val = isNaN(raw) ? 0 : Math.round(raw);
+    const raw = input.value.trim();
     dep.montants_mois = dep.montants_mois || {};
-    if (val === 0) {
+    if (raw === '') {
+      // Champ vide = supprimer l'override, revenir au montant_ht par défaut
       delete dep.montants_mois[key];
       if (Object.keys(dep.montants_mois).length === 0) delete dep.montants_mois;
     } else {
-      dep.montants_mois[key] = val;
+      // 0 saisi explicitement = forcer à 0 ce mois-ci
+      dep.montants_mois[key] = Math.max(0, Math.round(parseFloat(raw) || 0));
     }
     saveState();
     renderSocieteDetail(document.getElementById('app'), societeId);
