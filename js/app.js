@@ -6,6 +6,7 @@ const STATE_DEFAULTS = {
   cra_entries: [],
   depenses: [],
   paiements: [],
+  autres_revenus: [],
   fiscal_configs: [],
   simulations_ir: [],
   exercices_fiscaux: [],
@@ -1422,6 +1423,35 @@ function getDepenses(societeId) {
   return (STATE.depenses || []).filter(d => d.societe_id === societeId && d.actif !== false);
 }
 
+// ─── AUTRES REVENUS ──────────────────────────────────────────────────────────
+
+const CATS_AUTRE_REVENU = [
+  { value: 'cession_actions',   label: 'Cession d\'actions / titres' },
+  { value: 'dividendes_recus',  label: 'Dividendes reçus (participations)' },
+  { value: 'placement',         label: 'Revenus de placement / trésorerie' },
+  { value: 'subvention',        label: 'Subvention / aide publique' },
+  { value: 'remboursement',     label: 'Remboursement / avoir' },
+  { value: 'autre_revenu',      label: 'Autre revenu exceptionnel' },
+];
+
+function getAutresRevenus(societeId) {
+  return (STATE.autres_revenus || []).filter(r => r.societe_id === societeId);
+}
+
+function calcAutreRevenuMois(rev, annee, mois) {
+  const key = `${annee}-${mois}`;
+  if (rev.montants_mois && rev.montants_mois[key] !== undefined) return rev.montants_mois[key];
+  return 0;
+}
+
+function calcAutresRevenusAnnee(societeId, annee) {
+  let total = 0;
+  getAutresRevenus(societeId).forEach(r => {
+    for (let m = 1; m <= 12; m++) total += calcAutreRevenuMois(r, annee, m);
+  });
+  return total;
+}
+
 // Retourne le montant HT de la dépense pour un mois/année donné
 // Modèle : montants_mois[annee-mois] pour les dépenses normales, montant_ht chaque mois pour les salaires
 function calcDepenseMois(dep, annee, mois) {
@@ -1482,10 +1512,11 @@ function calcEncaissementsAnnee(societeId, annee) {
     const e = calcEncaissementsMois(societeId, annee, m);
     caHT += e.totalHT; caTTC += e.totalTTC; recuHT += e.totalRecuHT;
   }
+  caHT += calcAutresRevenusAnnee(societeId, annee);
   return { caHT, caTTC, recuHT };
 }
 
-// Assiette courante = CA confirmé reçu (recu: true) — toutes années
+// Assiette courante = CA confirmé reçu (recu: true) + autres revenus de l'année courante
 function calcAssietteCourante(societeId) {
   const missions = getMissionsActives(societeId);
   let total = 0;
@@ -1496,10 +1527,11 @@ function calcAssietteCourante(societeId) {
       if (!m) return;
       total += calcCRACell(m, p.annee_fact, p.mois_fact).caHT;
     });
+  total += calcAutresRevenusAnnee(societeId, new Date().getFullYear());
   return total;
 }
 
-// Assiette intermédiaire = confirmé (recu: true) + prévu prochainement (recu: false)
+// Assiette intermédiaire = confirmé + prévu + autres revenus
 function calcAssietteIntermediaire(societeId) {
   const missions = getMissionsActives(societeId);
   let total = 0;
@@ -1510,6 +1542,7 @@ function calcAssietteIntermediaire(societeId) {
       if (!m) return;
       total += calcCRACell(m, p.annee_fact, p.mois_fact).caHT;
     });
+  total += calcAutresRevenusAnnee(societeId, new Date().getFullYear());
   return total;
 }
 
@@ -1768,6 +1801,50 @@ function renderSocBilan(soc) {
     <td class="${COL_TOTAL} bg-slate-800/20"></td>
   </tr>`;
 
+  // ── Autres revenus ────────────────────────────────────────────────────────
+  const autresRevenusSoc = getAutresRevenus(soc.id);
+  const autresRevenusRows = autresRevenusSoc.map(rev => {
+    const catLabel = CATS_AUTRE_REVENU.find(c => c.value === rev.categorie)?.label || rev.categorie;
+    const cells = moisData.map(md => {
+      const isCur = annee === anneeCourante && md.mois === moisCourant;
+      const isFutur = annee === anneeCourante && md.mois > moisCourant;
+      const key = `${annee}-${md.mois}`;
+      const hasOverride = rev.montants_mois && rev.montants_mois[key] !== undefined;
+      const val = calcAutreRevenuMois(rev, annee, md.mois);
+      const isPrevi = isFutur && hasOverride;
+      return `<td class="${TD(isCur, val > 0 ? (isPrevi ? 'bg-amber-950/20' : 'bg-emerald-950/20') : 'bg-slate-800/20')} cursor-pointer hover:bg-slate-700/30"
+          onclick="editAutreRevenuMois('${rev.id}','${soc.id}',${annee},${md.mois},this)">
+        <div class="flex flex-col items-center gap-0 pointer-events-none">
+          ${val > 0
+            ? `<span class="${isPrevi ? 'text-amber-400/80 text-xs' : 'text-emerald-300'}">${isPrevi ? '~' : ''}${fmtE(val)}</span>`
+            : `<span class="text-slate-800">—</span>`}
+        </div>
+      </td>`;
+    }).join('');
+    let totR = 0;
+    for (let m = 1; m <= 12; m++) totR += calcAutreRevenuMois(rev, annee, m);
+    return `<tr class="border-b border-slate-700/30 group">
+      <td class="${TDL} bg-slate-800/20">
+        <div class="flex items-center justify-between">
+          <div>
+            <span class="text-emerald-400/80">${rev.label}</span>
+            <span class="text-slate-600 text-xs ml-1">${catLabel}</span>
+          </div>
+          <div class="hidden group-hover:flex gap-1 ml-2 shrink-0">
+            <button onclick="openAutreRevenuModal('${soc.id}','${rev.id}')" class="text-slate-500 hover:text-white text-xs">✏</button>
+            <button onclick="deleteAutreRevenu('${rev.id}','${soc.id}')" class="text-red-800 hover:text-red-400 text-xs ml-1">✕</button>
+          </div>
+        </div>
+      </td>
+      ${cells}
+      <td class="${COL_TOTAL} bg-emerald-900/20">
+        <span class="text-emerald-300">${totR > 0 ? fmtE(totR) : '—'}</span>
+      </td>
+      <td class="${COL_TOTAL} bg-slate-800/20"></td>
+      <td class="${COL_TOTAL} bg-slate-800/20"></td>
+    </tr>`;
+  }).join('');
+
   // ── Section DÉPENSES — groupées par catégorie ─────────────────────────────
   const caAnnuel = totEnc.caHT;
   const depsProjetees = calcDepensesProjetees(soc.id, annee, annee === anneeCourante ? moisCourant : 12);
@@ -1815,14 +1892,8 @@ function renderSocBilan(soc) {
         ? ` <span class="text-slate-600 text-xs">(${dep.event})</span>`
         : '';
     return `<tr class="border-b border-slate-700/30 group">
-      <td class="${TDL} bg-slate-800/20">
-        <div class="flex items-center justify-between">
-          <span class="text-slate-400">${dep.label}${labelSuffix}</span>
-          <div class="hidden group-hover:flex gap-1 ml-2 shrink-0">
-            <button onclick="openDepenseModal('${soc.id}','${dep.id}')" class="text-slate-500 hover:text-white text-xs">✏</button>
-            <button onclick="deleteDepense('${dep.id}','${soc.id}')" class="text-red-800 hover:text-red-400 text-xs ml-1">✕</button>
-          </div>
-        </div>
+      <td class="${TDL} bg-slate-800/20 cursor-pointer hover:bg-slate-700/30" onclick="openDepenseModal('${soc.id}','${dep.id}')">
+        <span class="text-slate-400 hover:text-white transition-colors">${dep.label}${labelSuffix}</span>
       </td>
       ${cells}
       <td class="${COL_TOTAL} bg-slate-700/30">
@@ -1966,7 +2037,10 @@ function renderSocBilan(soc) {
       <span class="text-white font-bold text-xl">${annee}</span>
       <button onclick="setBilanYear(1,'${soc.id}')" class="btn-secondary text-sm px-3 py-1">→</button>
     </div>
-    <button onclick="openDepenseModal('${soc.id}',null)" class="btn-primary text-sm">+ Ajouter une dépense</button>
+    <div class="flex gap-2">
+      <button onclick="openAutreRevenuModal('${soc.id}',null)" class="btn-secondary text-sm">+ Autre revenu</button>
+      <button onclick="openDepenseModal('${soc.id}',null)" class="btn-primary text-sm">+ Ajouter une dépense</button>
+    </div>
   </div>
   ${kpis}
   ${legende}
@@ -1978,6 +2052,7 @@ function renderSocBilan(soc) {
           <td colspan="16" class="px-3 py-1 text-xs font-bold text-emerald-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Revenus</td>
         </tr>
         ${missions.length > 0 ? missionEncRows : `<tr><td colspan="16" class="px-6 py-3 text-slate-600 text-xs italic">Aucune mission active</td></tr>`}
+        ${autresRevenusRows}
         ${revenusRow}
         <tr class="bg-slate-700/60 border-b border-slate-500">
           <td colspan="16" class="px-3 py-1 text-xs font-bold text-red-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Dépenses</td>
@@ -2997,6 +3072,7 @@ function openDepenseModal(societeId, depenseId) {
       <div class="flex gap-3 mt-5">
         <button class="btn-primary flex-1" onclick="saveDepense('${v.id}','${societeId}')">Enregistrer</button>
         <button class="btn-secondary" onclick="closeDepenseModal()">Annuler</button>
+        ${depenseId ? `<button class="btn-danger" onclick="closeDepenseModal();deleteDepense('${v.id}','${societeId}')">Supprimer</button>` : ''}
       </div>
     </div>
   </div>`);
@@ -3190,6 +3266,126 @@ function deleteDepense(id, societeId) {
   STATE.depenses = (STATE.depenses || []).filter(d => d.id !== id);
   saveState();
   renderSocieteDetail(document.getElementById('app'), societeId);
+}
+
+// ─── AUTRES REVENUS — CRUD ───────────────────────────────────────────────────
+
+function openAutreRevenuModal(societeId, revenuId) {
+  const rev = revenuId ? (STATE.autres_revenus || []).find(r => r.id === revenuId) : null;
+  const v = rev || { id: uid(), societe_id: societeId, label: '', categorie: 'cession_actions', montants_mois: {} };
+  const catsOptions = CATS_AUTRE_REVENU.map(c =>
+    `<option value="${c.value}" ${v.categorie === c.value ? 'selected' : ''}>${c.label}</option>`
+  ).join('');
+  const now = new Date();
+  const defaultMois = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+
+  document.body.insertAdjacentHTML('beforeend', `
+  <div id="autre-revenu-modal" class="modal-backdrop" onclick="if(event.target===this)closeAutreRevenuModal()">
+    <div class="modal-box">
+      <h3 class="text-base font-semibold text-white mb-4">Autre revenu</h3>
+      <div class="space-y-3">
+        <div>
+          <label class="label">Libellé *</label>
+          <input id="ar-label" class="input" value="${v.label}" placeholder="Ex : Cession actions XYZ, Aide URSSAF…" />
+        </div>
+        <div>
+          <label class="label">Catégorie</label>
+          <select id="ar-cat" class="input">${catsOptions}</select>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="label">Montant HT (€) *</label>
+            <input id="ar-montant" class="input" type="number" min="0" step="0.01" placeholder="0" />
+          </div>
+          <div>
+            <label class="label">Mois *</label>
+            <input id="ar-mois" class="input" type="month" value="${defaultMois}" />
+          </div>
+        </div>
+        <div>
+          <label class="label">TVA applicable</label>
+          <div class="flex gap-2 mt-1">
+            <button id="ar-tva-non" onclick="document.getElementById('ar-tva-val').value='0';document.getElementById('ar-tva-non').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('ar-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
+              class="flex-1 text-xs py-1.5 rounded bg-blue-600 text-white">Non</button>
+            <button id="ar-tva-oui" onclick="document.getElementById('ar-tva-val').value='0.20';document.getElementById('ar-tva-oui').className='flex-1 text-xs py-1.5 rounded bg-blue-600 text-white';document.getElementById('ar-tva-non').className='flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600';"
+              class="flex-1 text-xs py-1.5 rounded bg-slate-700 text-slate-400 hover:bg-slate-600">20%</button>
+          </div>
+          <input type="hidden" id="ar-tva-val" value="0" />
+        </div>
+        <p class="text-slate-600 text-xs">Le montant sera enregistré sur le mois choisi. Pour d'autres mois, cliquez directement sur les cellules dans le tableau.</p>
+      </div>
+      <div class="flex gap-3 mt-5">
+        <button class="btn-primary flex-1" onclick="saveAutreRevenu('${v.id}','${societeId}')">Enregistrer</button>
+        <button class="btn-secondary" onclick="closeAutreRevenuModal()">Annuler</button>
+      </div>
+    </div>
+  </div>`);
+}
+
+function closeAutreRevenuModal() { document.getElementById('autre-revenu-modal')?.remove(); }
+
+function saveAutreRevenu(id, societeId) {
+  const label   = document.getElementById('ar-label').value.trim();
+  const montant = parseFloat(document.getElementById('ar-montant').value);
+  if (!label) return alert('Le libellé est obligatoire.');
+  if (!montant || montant <= 0) return alert('Le montant doit être supérieur à 0.');
+  const moisVal = document.getElementById('ar-mois').value;
+  if (!moisVal) return alert('Le mois est obligatoire.');
+  const [y, m] = moisVal.split('-').map(Number);
+
+  const existing = (STATE.autres_revenus || []).find(r => r.id === id);
+  const montants_mois = existing ? { ...(existing.montants_mois || {}) } : {};
+  montants_mois[`${y}-${m}`] = montant;
+
+  const data = {
+    id, societe_id: societeId, label,
+    categorie: document.getElementById('ar-cat').value,
+    tva_taux:  parseFloat(document.getElementById('ar-tva-val').value) || 0,
+    montants_mois,
+  };
+  if (!STATE.autres_revenus) STATE.autres_revenus = [];
+  const idx = STATE.autres_revenus.findIndex(r => r.id === id);
+  if (idx !== -1) STATE.autres_revenus[idx] = data;
+  else STATE.autres_revenus.push(data);
+  saveState();
+  closeAutreRevenuModal();
+  _socTab = 'bilan';
+  renderSocieteDetail(document.getElementById('app'), societeId);
+}
+
+function deleteAutreRevenu(id, societeId) {
+  if (!confirm('Supprimer ce revenu ?')) return;
+  STATE.autres_revenus = (STATE.autres_revenus || []).filter(r => r.id !== id);
+  saveState();
+  renderSocieteDetail(document.getElementById('app'), societeId);
+}
+
+function editAutreRevenuMois(revId, societeId, annee, mois, td) {
+  if (td.querySelector('input')) return;
+  const rev = (STATE.autres_revenus || []).find(r => r.id === revId);
+  if (!rev) return;
+  const key = `${annee}-${mois}`;
+  const currentVal = rev.montants_mois?.[key] ?? 0;
+  const prev = td.innerHTML;
+  td.innerHTML = `<input type="number" min="0" step="1" value="${currentVal || ''}" placeholder="0"
+    class="w-16 bg-slate-900 border border-emerald-500 rounded px-1 py-0.5 text-center text-emerald-300 text-xs outline-none"
+    onclick="event.stopPropagation()" />`;
+  const input = td.querySelector('input');
+  input.focus(); input.select();
+  const save = () => {
+    const raw = input.value.trim();
+    rev.montants_mois = rev.montants_mois || {};
+    if (raw === '') { delete rev.montants_mois[key]; }
+    else { rev.montants_mois[key] = Math.max(0, Math.round(parseFloat(raw) || 0)); }
+    if (!Object.keys(rev.montants_mois).length) delete rev.montants_mois;
+    saveState();
+    renderSocieteDetail(document.getElementById('app'), societeId);
+  };
+  input.addEventListener('blur', save);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { td.innerHTML = prev; }
+  });
 }
 
 // ─── BARÈMES PAR ANNÉE DE REVENUS ────────────────────────────────────────────
