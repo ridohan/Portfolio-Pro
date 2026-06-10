@@ -1718,8 +1718,10 @@ function renderSocBilan(soc) {
       <th class="${TDL} bg-slate-700 text-slate-400 font-medium"></th>
       ${moisLabels.map((l, i) => `<th class="${TH(annee === anneeCourante && i+1 === moisCourant)}">${l}</th>`).join('')}
       <th class="${COL_TOTAL} bg-slate-600 text-white min-w-[105px]">Total ${annee}</th>
-      <th class="${COL_TOTAL} bg-slate-700 text-slate-400 min-w-[80px]">Moy./mois</th>
       <th class="${COL_TOTAL} bg-slate-700 text-slate-400 min-w-[70px]">% CA</th>
+      <th class="${COL_TOTAL} bg-slate-700 text-slate-400 min-w-[80px]">Moy./mois</th>
+      <th class="${COL_TOTAL} bg-violet-900/40 text-violet-300 min-w-[105px]">Total projeté</th>
+      <th class="${COL_TOTAL} bg-violet-900/40 text-violet-300 min-w-[70px]">% CA proj.</th>
     </tr>
   </thead>`;
 
@@ -1776,6 +1778,8 @@ function renderSocBilan(soc) {
       </td>
       <td class="${COL_TOTAL} bg-slate-800/20"></td>
       <td class="${COL_TOTAL} bg-slate-800/20"></td>
+      <td class="${COL_TOTAL} bg-slate-800/20"></td>
+      <td class="${COL_TOTAL} bg-slate-800/20"></td>
     </tr>`;
   }).join('');
 
@@ -1797,6 +1801,8 @@ function renderSocBilan(soc) {
       <div class="text-emerald-300 font-bold">${fmtE(totEnc.caHT)}</div>
       ${totEnc.recuHT > 0 ? `<div class="text-emerald-500 text-xs">dont ✓ ${fmtE(totEnc.recuHT)}</div>` : ''}
     </td>
+    <td class="${COL_TOTAL} bg-slate-800/20"></td>
+    <td class="${COL_TOTAL} bg-slate-800/20"></td>
     <td class="${COL_TOTAL} bg-slate-800/20"></td>
     <td class="${COL_TOTAL} bg-slate-800/20"></td>
   </tr>`;
@@ -1837,9 +1843,11 @@ function renderSocBilan(soc) {
         </div>
       </td>
       ${cells}
+      <td class="${COL_TOTAL} bg-slate-800/20"></td>
       <td class="${COL_TOTAL} bg-emerald-900/20">
         <span class="text-emerald-300">${totR > 0 ? fmtE(totR) : '—'}</span>
       </td>
+      <td class="${COL_TOTAL} bg-slate-800/20"></td>
       <td class="${COL_TOTAL} bg-slate-800/20"></td>
       <td class="${COL_TOTAL} bg-slate-800/20"></td>
     </tr>`;
@@ -1896,39 +1904,43 @@ function renderSocBilan(soc) {
         <span class="text-slate-400 hover:text-white transition-colors">${dep.label}${labelSuffix}</span>
       </td>
       ${cells}
-      <td class="${COL_TOTAL} bg-slate-700/30">
-        <div class="flex flex-col items-center gap-0">
-          <span class="text-red-300">${totD > 0 ? fmtE(totD) : '—'}</span>
-          ${isSal && totNet > 0 ? `<span class="text-emerald-700 text-xs">net ${fmtE(totNet)}</span>` : ''}
-        </div>
-      </td>
-      <td class="${COL_TOTAL} bg-slate-800/30 text-slate-400">
-        ${(() => {
-          const moisRef = annee === anneeCourante ? moisCourant : 12;
-          return totD > 0 ? fmtE(Math.round(totD / moisRef)) : '—';
-        })()}
-      </td>
-      <td class="${COL_TOTAL} bg-slate-800/30 ${caAnnuel > 0 && totD > 0 ? 'text-amber-400' : 'text-slate-600'}">
-        ${caAnnuel > 0 && totD > 0 ? (totD / caAnnuel * 100).toFixed(1) + ' %' : '—'}
-      </td>
+      ${(() => {
+        const moisRef = annee === anneeCourante ? moisCourant : 12;
+        const moy = totD > 0 ? fmtE(Math.round(totD / moisRef)) : '—';
+        let totProj = 0;
+        for (let m = 1; m <= 12; m++) totProj += calcDepenseMoisProjecte(dep, annee, m, annee === anneeCourante ? moisCourant : 12);
+        const pctCA    = caAnnuel > 0 && totD    > 0 ? (totD    / caAnnuel * 100).toFixed(1) + ' %' : '—';
+        const pctProj  = caAnnuel > 0 && totProj > 0 ? (totProj / caAnnuel * 100).toFixed(1) + ' %' : '—';
+        return `
+          <td class="${COL_TOTAL} bg-slate-700/30">
+            <div class="flex flex-col items-center gap-0">
+              <span class="text-red-300">${totD > 0 ? fmtE(totD) : '—'}</span>
+              ${isSal && totNet > 0 ? `<span class="text-emerald-700 text-xs">net ${fmtE(totNet)}</span>` : ''}
+            </div>
+          </td>
+          <td class="${COL_TOTAL} bg-slate-800/30 ${caAnnuel > 0 && totD > 0 ? 'text-amber-400' : 'text-slate-600'}">${pctCA}</td>
+          <td class="${COL_TOTAL} bg-slate-800/30 text-slate-400">${moy}</td>
+          <td class="${COL_TOTAL} bg-violet-900/20 ${totProj > 0 ? 'text-violet-300' : 'text-slate-700'}">${totProj > 0 ? fmtE(totProj) : '—'}</td>
+          <td class="${COL_TOTAL} bg-violet-900/20 ${caAnnuel > 0 && totProj > 0 ? 'text-violet-400' : 'text-slate-700'}">${pctProj}</td>`;
+      })()}
     </tr>`;
   };
 
   const depRows = (() => {
     if (depenses.length === 0)
-      return `<tr><td colspan="16" class="px-3 py-4 text-center text-slate-600 text-xs italic">Aucune dépense — cliquez sur "+ Ajouter une dépense"</td></tr>`;
+      return `<tr><td colspan="18" class="px-3 py-4 text-center text-slate-600 text-xs italic">Aucune dépense — cliquez sur "+ Ajouter une dépense"</td></tr>`;
     let html = '';
     CATS_DEPENSE_GROUPS.forEach(grp => {
       const grpDeps = depenses.filter(d => grp.cats.some(c => c.value === d.categorie));
       if (grpDeps.length === 0) return;
-      html += `<tr><td colspan="16" class="px-3 py-1.5 text-xs font-semibold text-slate-500 bg-slate-800/50 tracking-wide">${grp.group}</td></tr>`;
+      html += `<tr><td colspan="18" class="px-3 py-1.5 text-xs font-semibold text-slate-500 bg-slate-800/50 tracking-wide">${grp.group}</td></tr>`;
       html += grpDeps.map(renderDepRow).join('');
     });
     // Dépenses dont la catégorie ne correspond à aucun groupe (données legacy)
     const known = new Set(CATS_DEPENSE_GROUPS.flatMap(g => g.cats.map(c => c.value)));
     const orphans = depenses.filter(d => !known.has(d.categorie));
     if (orphans.length) {
-      html += `<tr><td colspan="16" class="px-3 py-1.5 text-xs font-semibold text-slate-500 bg-slate-800/50">📦 Autres</td></tr>`;
+      html += `<tr><td colspan="18" class="px-3 py-1.5 text-xs font-semibold text-slate-500 bg-slate-800/50">📦 Autres</td></tr>`;
       html += orphans.map(renderDepRow).join('');
     }
     return html;
@@ -1946,6 +1958,8 @@ function renderSocBilan(soc) {
     <td class="${COL_TOTAL} bg-red-900/40 text-red-300 font-bold">${totDeps.totalHT > 0 ? fmtE(totDeps.totalHT) : '—'}</td>
     <td class="${COL_TOTAL} bg-slate-800/30"></td>
     <td class="${COL_TOTAL} bg-slate-800/30"></td>
+    <td class="${COL_TOTAL} bg-violet-900/20 text-violet-300 font-bold">${depsProjetees > 0 ? fmtE(depsProjetees) : '—'}</td>
+    <td class="${COL_TOTAL} bg-slate-800/30"></td>
   </tr>`;
 
   // ── Section RÉSULTAT ─────────────────────────────────────────────────────
@@ -1962,6 +1976,10 @@ function renderSocBilan(soc) {
     }).join('')}
     <td class="${COL_TOTAL} bg-slate-600">
       <span class="${resultatFin > 0 ? 'text-emerald-400' : 'text-red-400'} font-bold text-sm">${fmtE(resultatFin)}</span>
+    </td>
+    <td class="${COL_TOTAL} bg-slate-700"></td>
+    <td class="${COL_TOTAL} bg-slate-600">
+      <span class="${resultatProjecte >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold text-sm">${fmtE(resultatProjecte)}</span>
     </td>
     <td class="${COL_TOTAL} bg-slate-700"></td>
     <td class="${COL_TOTAL} bg-slate-700"></td>
@@ -2049,18 +2067,18 @@ function renderSocBilan(soc) {
       ${thead}
       <tbody>
         <tr class="bg-slate-700/60 border-b border-slate-500">
-          <td colspan="16" class="px-3 py-1 text-xs font-bold text-emerald-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Revenus</td>
+          <td colspan="18" class="px-3 py-1 text-xs font-bold text-emerald-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Revenus</td>
         </tr>
-        ${missions.length > 0 ? missionEncRows : `<tr><td colspan="16" class="px-6 py-3 text-slate-600 text-xs italic">Aucune mission active</td></tr>`}
+        ${missions.length > 0 ? missionEncRows : `<tr><td colspan="18" class="px-6 py-3 text-slate-600 text-xs italic">Aucune mission active</td></tr>`}
         ${autresRevenusRows}
         ${revenusRow}
         <tr class="bg-slate-700/60 border-b border-slate-500">
-          <td colspan="16" class="px-3 py-1 text-xs font-bold text-red-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Dépenses</td>
+          <td colspan="18" class="px-3 py-1 text-xs font-bold text-red-400 uppercase tracking-wider sticky left-0 bg-slate-700/60">Dépenses</td>
         </tr>
         ${depRows}
         ${depTotRow}
         <tr class="bg-slate-700/60 border-b border-slate-500">
-          <td colspan="16" class="px-3 py-1 text-xs font-bold text-slate-300 uppercase tracking-wider sticky left-0 bg-slate-700/60">Résultat</td>
+          <td colspan="18" class="px-3 py-1 text-xs font-bold text-slate-300 uppercase tracking-wider sticky left-0 bg-slate-700/60">Résultat</td>
         </tr>
         ${resultatRow}
       </tbody>
