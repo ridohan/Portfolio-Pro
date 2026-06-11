@@ -1600,6 +1600,7 @@ const CATS_DEPENSE_GROUPS = [
       { value: 'prevoyance_salaries',  label: 'Cotisations prévoyance de vos salariés' },
       { value: 'cotis_facultatives',   label: 'Cotisations sociales facultatives / complémentaires (Dirigeant)' },
       { value: 'social',               label: 'Charges sociales TNS' },
+      { value: 'ir_pas',               label: 'IR prélevé à la source (PAS)' },
     ],
   },
   {
