@@ -376,11 +376,13 @@ function resetData() {
 // ─── DASHBOARD ───────────────────────────────────────────────────────────────
 
 function renderDashboard(app) {
-  const societes = STATE.societes || [];
-  const simuls   = STATE.simulations_ir || [];
-  const annee    = new Date().getFullYear();
-  const now      = new Date();
-  const moisCur  = now.getMonth() + 1;
+  const toutes      = STATE.societes || [];
+  const societes    = toutes.filter(s => !s.is_simulation);
+  const simSocietes = toutes.filter(s => s.is_simulation);
+  const simuls      = STATE.simulations_ir || [];
+  const annee       = new Date().getFullYear();
+  const now         = new Date();
+  const moisCur     = now.getMonth() + 1;
 
   // ── Calcul agrégé par société ──────────────────────────────────────────────
   const socData = societes.map(s => {
@@ -417,6 +419,27 @@ function renderDashboard(app) {
 
     const missions = getMissionsActives(s.id);
     return { s, caFin, caCour, caInter, resultatFin, resultatCour, encMois, netAnnuel, fiscEstim, netFinal, totDepsHT, missions };
+  });
+
+  // ── Calcul agrégé par simulation société ──────────────────────────────────
+  const simSocData = simSocietes.map(s => {
+    const totDepsHT   = calcDepensesAnnee(s.id, annee).totalHT;
+    const caFin       = calcEncaissementsAnnee(s.id, annee).caHT;
+    const caCour      = calcAssietteCourante(s.id);
+    const resultatFin = Math.max(0, caFin - totDepsHT);
+    const missions    = getMissionsActives(s.id);
+    let fiscEstim = null, netFinal = null;
+    if (s.regime_fiscal === 'is' && resultatFin > 0) {
+      const cfg = getISConfig(s.id);
+      const is  = calcIS(resultatFin, cfg);
+      fiscEstim = is.isTotal; netFinal = resultatFin - is.isTotal;
+    } else if (s.regime_fiscal === 'ir' && resultatFin > 0) {
+      const cfg  = getBilanIRConfig(s.id);
+      const scen = calcScenariosIR(resultatFin, cfg);
+      const s97  = scen[1];
+      fiscEstim = s97.ir.impotFinal + s97.csgMontant; netFinal = s97.netImpot;
+    }
+    return { s, caFin, caCour, resultatFin, totDepsHT, fiscEstim, netFinal, missions };
   });
 
   // ── KPIs globaux ─────────────────────────────────────────────────────────
@@ -563,6 +586,70 @@ function renderDashboard(app) {
         </a>`;
       }).join('');
 
+  // ── Cartes simulations sociétés ───────────────────────────────────────────
+  const simSocCards = simSocData.length === 0 ? '' : simSocData.map(({ s, caFin, caCour, resultatFin, totDepsHT, fiscEstim, netFinal, missions }) => {
+    const forme   = { ei: 'EI', eurl: 'EURL', sarl: 'SARL', sas: 'SAS', sasu: 'SASU', snc: 'SNC', sci: 'SCI' }[s.forme] || s.forme;
+    const reg     = s.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue');
+    const pct     = caFin > 0 ? Math.round(caCour / caFin * 100) : 0;
+    const barW    = Math.min(100, pct);
+    const origine = toutes.find(x => x.id === s.simulation_de);
+
+    const fiscLine = fiscEstim !== null ? `
+      <div class="flex justify-between items-center text-xs">
+        <span class="text-slate-500">Fiscalité estimée (${s.regime_fiscal === 'is' ? 'IS' : 'IR ~9,7% CSG'})</span>
+        <span class="text-amber-400 font-medium">− ${fmtE(fiscEstim)}</span>
+      </div>` : '';
+
+    const netFinalLine = netFinal !== null ? `
+      <div class="flex justify-between items-center text-sm border-t border-violet-700/30 pt-2 mt-1">
+        <span class="text-slate-300 font-semibold">${s.regime_fiscal === 'is' ? 'Résultat net après IS' : 'Net d\'impôt (scén. 9,7%)'}</span>
+        <span class="${netFinal >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold text-base">${fmtE(netFinal)}</span>
+      </div>` : '';
+
+    return `
+    <a href="#societes/${s.id}" class="block bg-slate-800 rounded-xl border border-violet-700/50 hover:border-violet-500 transition-colors overflow-hidden">
+      <div class="px-4 pt-4 pb-3 flex items-start justify-between">
+        <div>
+          <div class="font-semibold text-violet-200 text-base">${s.nom}</div>
+          <div class="text-slate-500 text-xs mt-0.5">${forme} · ${origine ? `basée sur ${origine.nom}` : 'simulation'}</div>
+        </div>
+        ${reg}
+      </div>
+      <div class="px-4 pb-3">
+        <div class="flex justify-between text-xs mb-1">
+          <span class="text-slate-500">CA encaissé <span class="text-emerald-400 font-medium">${fmtE(caCour)}</span></span>
+          <span class="text-slate-600">/ prév. <span class="text-slate-400">${fmtE(caFin)}</span> · <span class="${pct >= 75 ? 'text-emerald-400' : pct >= 40 ? 'text-amber-400' : 'text-slate-500'}">${pct}%</span></span>
+        </div>
+        <div class="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+          <div class="h-full rounded-full ${pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-violet-500'} transition-all" style="width:${barW}%"></div>
+        </div>
+      </div>
+      <div class="px-4 pb-4 space-y-1.5 border-t border-violet-700/20 pt-3">
+        <div class="flex justify-between items-center text-xs">
+          <span class="text-slate-500">Résultat avant impôt</span>
+          <span class="${resultatFin > 0 ? 'text-white' : 'text-red-400'} font-semibold">${fmtE(resultatFin)}</span>
+        </div>
+        <div class="flex justify-between items-center text-xs">
+          <span class="text-slate-500">Dépenses</span>
+          <span class="text-red-300">${fmtE(totDepsHT)}</span>
+        </div>
+        ${fiscLine}
+        ${netFinalLine}
+      </div>
+    </a>`;
+  }).join('');
+
+  const simSocBlock = simSocData.length === 0 ? '' : `
+  <div class="mb-6">
+    <div class="flex items-center gap-2 mb-3">
+      <h2 class="text-base font-semibold text-violet-300">🔮 Simulations</h2>
+      <span class="text-xs text-violet-600 bg-violet-900/30 border border-violet-800/40 rounded px-2 py-0.5">${simSocData.length} simulation${simSocData.length > 1 ? 's' : ''}</span>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+      ${simSocCards}
+    </div>
+  </div>`;
+
   // ── Récap mensuel (revenus mois par mois toutes sociétés) ─────────────────
   const moisLabels = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
   const mensuelRows = societes.length > 0 ? societes.map(s => {
@@ -633,10 +720,14 @@ function renderDashboard(app) {
     ${globalKpis}
     ${mensuelTable}
 
-    <h2 class="text-base font-semibold text-white mb-3">🏢 Mes sociétés</h2>
-    <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">
-      ${socCards}
+    <div class="mb-6">
+      <h2 class="text-base font-semibold text-white mb-3">🏢 Mes sociétés</h2>
+      <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+        ${socCards}
+      </div>
     </div>
+
+    ${simSocBlock}
 
     ${lastSimHtml}
   </div>`;
