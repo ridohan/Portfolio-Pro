@@ -24,6 +24,7 @@ function saveState() {
 // ─── AUTO-SAVE FILE SYSTEM ACCESS API ────────────────────────────────────────
 
 let _fsHandle = null; // FileSystemFileHandle en mémoire pour la session
+const LAST_FILE_SAVE_TS_KEY = 'portfoliopro_last_file_save_ts';
 
 // IndexedDB : stocker / récupérer le handle entre sessions
 const _fsDB = (() => {
@@ -75,6 +76,7 @@ async function autoSaveToFile() {
     const writable = await _fsHandle.createWritable();
     await writable.write(JSON.stringify(payload, null, 2));
     await writable.close();
+    localStorage.setItem(LAST_FILE_SAVE_TS_KEY, String(Date.now()));
     _updateAutoSaveIndicator('ok');
   } catch (e) {
     console.warn('Auto-save échoué :', e);
@@ -115,11 +117,15 @@ async function disableAutoSave() {
 async function restoreAutoSaveHandle() {
   try {
     const handle = await _fsDB.load();
-    if (!handle) return;
+    if (!handle) { _updateAutoSaveIndicator('off'); return; }
     // Vérifier si la permission est encore accordée (sans la demander)
     const perm = await handle.queryPermission({ mode: 'readwrite' });
     if (perm === 'granted') {
       _fsHandle = handle;
+      try {
+        const file = await handle.getFile();
+        localStorage.setItem(LAST_FILE_SAVE_TS_KEY, String(file.lastModified));
+      } catch (_) {}
       _updateAutoSaveIndicator('ok');
     } else {
       // Permission expirée — on garde le handle pour pouvoir re-demander au clic
@@ -145,21 +151,28 @@ async function reauthorizeAutoSave() {
 }
 
 // Indicateur dans la navbar
+function _lastFileSaveLabel() {
+  const ts = localStorage.getItem(LAST_FILE_SAVE_TS_KEY);
+  if (!ts) return '';
+  return new Date(Number(ts)).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
 function _updateAutoSaveIndicator(status) {
   const el = document.getElementById('autosave-indicator');
   if (!el) return;
+  const label = _lastFileSaveLabel();
   const cfg = {
-    ok:      { dot: 'bg-emerald-400', text: 'Auto-save actif', title: 'Sauvegarde automatique active' },
-    pending: { dot: 'bg-amber-400 animate-pulse', text: 'Cliquer pour ré-autoriser', title: 'Permission expirée — cliquer pour réactiver' },
-    error:   { dot: 'bg-red-400', text: 'Erreur auto-save', title: 'Échec de la sauvegarde automatique' },
-    off:     { dot: 'hidden', text: '', title: '' },
-  }[status] || { dot: 'hidden', text: '', title: '' };
-  el.innerHTML = status === 'off' ? '' : `
+    ok:      { dot: 'bg-emerald-400',             text: label ? `Sauvegardé ${label}` : 'Auto-save actif', title: 'Sauvegarde automatique active — cliquer pour les paramètres' },
+    pending: { dot: 'bg-amber-400 animate-pulse', text: 'Cliquer pour ré-autoriser',                       title: 'Permission expirée — cliquer pour réactiver' },
+    error:   { dot: 'bg-red-400',                 text: 'Erreur auto-save',                                title: 'Échec de la sauvegarde automatique' },
+    off:     { dot: 'bg-orange-400',              text: 'Pas de sauvegarde fichier',                       title: 'Aucun fichier auto-save configuré — cliquer pour activer' },
+  }[status] || { dot: 'bg-orange-400', text: 'Pas de sauvegarde fichier', title: '' };
+  el.innerHTML = `
     <button onclick="${status === 'pending' ? 'reauthorizeAutoSave()' : 'openSettings()'}"
       class="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors"
       title="${cfg.title}">
       <span class="w-1.5 h-1.5 rounded-full ${cfg.dot}"></span>
-      <span>${cfg.text}</span>
+      <span class="hidden sm:inline">${cfg.text}</span>
     </button>`;
 }
 
