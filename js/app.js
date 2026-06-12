@@ -632,27 +632,38 @@ function renderDashboard(app) {
 // ─── SOCIÉTÉS ────────────────────────────────────────────────────────────────
 
 function renderSocietes(app) {
-  const societes = STATE.societes || [];
+  const toutes = STATE.societes || [];
+  const societes   = toutes.filter(s => !s.is_simulation);
+  const simulations = toutes.filter(s => s.is_simulation);
 
-  const rows = societes.length === 0
-    ? `<div class="text-center py-12 text-slate-500">Aucune société. Cliquez sur "+ Ajouter".</div>`
-    : `<div class="space-y-3">${societes.map(s => {
-        const forme = { ei: 'EI', eurl: 'EURL', sarl: 'SARL', sas: 'SAS', sasu: 'SASU', snc: 'SNC', sci: 'SCI' }[s.forme] || s.forme;
-        return `
-        <div onclick="navigate('#societes/${s.id}')"
-          class="bg-slate-800 rounded-xl border border-slate-700 p-4 flex items-center justify-between cursor-pointer hover:bg-slate-750 hover:border-slate-600 transition-colors">
-          <div>
-            <span class="font-semibold text-white">${s.nom}</span>
-            <span class="ml-2 text-slate-500 text-sm">${forme}</span>
-            <span class="ml-2">${s.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue')}</span>
-            ${s.capital ? `<span class="ml-2 text-slate-400 text-xs">Capital ${fmtE(s.capital)}</span>` : ''}
-          </div>
-          <div class="flex gap-2" onclick="event.stopPropagation()">
-            <button onclick="openSocieteModal('${s.id}')" class="btn-secondary text-xs">Modifier</button>
-            <button onclick="deleteSociete('${s.id}')" class="btn-danger text-xs">Suppr.</button>
-          </div>
-        </div>`;
-      }).join('')}</div>`;
+  const socCard = (s, isSim = false) => {
+    const forme = { ei: 'EI', eurl: 'EURL', sarl: 'SARL', sas: 'SAS', sasu: 'SASU', snc: 'SNC', sci: 'SCI' }[s.forme] || s.forme;
+    const origine = isSim && s.simulation_de
+      ? toutes.find(x => x.id === s.simulation_de)
+      : null;
+    return `
+    <div onclick="navigate('#societes/${s.id}')"
+      class="bg-slate-800 rounded-xl border ${isSim ? 'border-violet-700/50' : 'border-slate-700'} p-4 flex items-center justify-between cursor-pointer hover:border-${isSim ? 'violet-500' : 'slate-600'} transition-colors">
+      <div>
+        <span class="font-semibold ${isSim ? 'text-violet-200' : 'text-white'}">${s.nom}</span>
+        <span class="ml-2 text-slate-500 text-sm">${forme}</span>
+        <span class="ml-2">${s.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue')}</span>
+        ${origine ? `<span class="ml-2 text-violet-500 text-xs">basée sur ${origine.nom}</span>` : ''}
+      </div>
+      <div class="flex gap-2" onclick="event.stopPropagation()">
+        <button onclick="openSocieteModal('${s.id}')" class="btn-secondary text-xs">Modifier</button>
+        <button onclick="deleteSociete('${s.id}')" class="btn-danger text-xs">Suppr.</button>
+      </div>
+    </div>`;
+  };
+
+  const rowsSoc = societes.length === 0
+    ? `<div class="text-center py-8 text-slate-500 text-sm">Aucune société. Cliquez sur "+ Ajouter".</div>`
+    : `<div class="space-y-3">${societes.map(s => socCard(s, false)).join('')}</div>`;
+
+  const rowsSim = simulations.length === 0
+    ? `<div class="text-slate-600 text-sm italic py-2">Aucune simulation. Dupliquez une société depuis sa fiche.</div>`
+    : `<div class="space-y-3">${simulations.map(s => socCard(s, true)).join('')}</div>`;
 
   app.innerHTML = `
   ${navBar('societes')}
@@ -661,7 +672,11 @@ function renderSocietes(app) {
       <h1 class="text-xl font-bold text-white">Mes sociétés</h1>
       <button onclick="openSocieteModal()" class="btn-primary text-sm">+ Ajouter</button>
     </div>
-    ${rows}
+    ${rowsSoc}
+    <div class="mt-8">
+      <h2 class="text-base font-semibold text-violet-300 mb-3">🔮 Simulations</h2>
+      ${rowsSim}
+    </div>
   </div>`;
 }
 
@@ -747,6 +762,63 @@ function saveSociete(id) {
 function deleteSociete(id) {
   if (!confirm('Supprimer cette société ?')) return;
   STATE.societes = (STATE.societes || []).filter(s => s.id !== id);
+  saveState();
+  renderSocietes(document.getElementById('app'));
+}
+
+function dupliquerEnSimulation(societeId) {
+  const src = (STATE.societes || []).find(s => s.id === societeId);
+  if (!src) return;
+  const nom = prompt('Nom de la simulation :', `[Sim] ${src.nom}`);
+  if (!nom) return;
+
+  const idMap = {}; // ancienId → nouvelId
+  const newId = id => { if (!idMap[id]) idMap[id] = uid(); return idMap[id]; };
+  const simId = uid();
+
+  // Copie de la société
+  const simSoc = { ...src, id: simId, nom, is_simulation: true, simulation_de: societeId };
+  STATE.societes = [...(STATE.societes || []), simSoc];
+
+  // Deep copy des données liées
+  const missionIds = [];
+  STATE.missions = [
+    ...(STATE.missions || []),
+    ...(STATE.missions || [])
+      .filter(m => m.societe_id === societeId)
+      .map(m => { const nid = newId(m.id); missionIds.push(nid); return { ...m, id: nid, societe_id: simId }; }),
+  ];
+  STATE.cra_entries = [
+    ...(STATE.cra_entries || []),
+    ...(STATE.cra_entries || [])
+      .filter(e => e.societe_id === societeId)
+      .map(e => ({ ...e, id: uid(), societe_id: simId, mission_id: newId(e.mission_id) })),
+  ];
+  STATE.paiements = [
+    ...(STATE.paiements || []),
+    ...(STATE.paiements || [])
+      .filter(p => p.societe_id === societeId)
+      .map(p => ({ ...p, id: uid(), societe_id: simId, mission_id: newId(p.mission_id) })),
+  ];
+  STATE.depenses = [
+    ...(STATE.depenses || []),
+    ...(STATE.depenses || [])
+      .filter(d => d.societe_id === societeId)
+      .map(d => ({ ...d, id: uid(), societe_id: simId })),
+  ];
+  STATE.autres_revenus = [
+    ...(STATE.autres_revenus || []),
+    ...(STATE.autres_revenus || [])
+      .filter(r => r.societe_id === societeId)
+      .map(r => ({ ...r, id: uid(), societe_id: simId })),
+  ];
+  STATE.fiscal_configs = [
+    ...(STATE.fiscal_configs || []),
+    ...(STATE.fiscal_configs || [])
+      .filter(c => c.societe_id === societeId)
+      .map(c => ({ ...c, id: uid(), societe_id: simId })),
+  ];
+
   saveState();
   renderSocietes(document.getElementById('app'));
 }
@@ -895,10 +967,14 @@ function renderSocieteDetail(app, id) {
   app.innerHTML = `
   ${navBar('societes')}
   <div class="page-container px-4 py-6">
-    <div class="flex items-center gap-3 mb-4">
-      <a href="#societes" class="text-slate-400 hover:text-white text-sm">← Sociétés</a>
-      <h1 class="text-xl font-bold text-white">${soc.nom}</h1>
-      ${soc.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue')}
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-3">
+        <a href="#societes" class="text-slate-400 hover:text-white text-sm">← Sociétés</a>
+        <h1 class="text-xl font-bold ${soc.is_simulation ? 'text-violet-200' : 'text-white'}">${soc.nom}</h1>
+        ${soc.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue')}
+        ${soc.is_simulation ? `<span class="text-xs bg-violet-900/50 text-violet-300 border border-violet-700/50 rounded px-2 py-0.5">Simulation</span>` : ''}
+      </div>
+      ${!soc.is_simulation ? `<button onclick="dupliquerEnSimulation('${soc.id}')" class="text-xs bg-violet-900/40 hover:bg-violet-800/50 text-violet-300 border border-violet-700/50 rounded-lg px-3 py-1.5 transition-colors">🔮 Dupliquer en simulation</button>` : ''}
     </div>
     <div class="flex border-b border-slate-700 mb-6">${tabsHtml}</div>
     <div id="soc-content">${content}</div>
