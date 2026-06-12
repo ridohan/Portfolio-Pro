@@ -855,8 +855,10 @@ function saveSociete(id) {
 
   if (!STATE.societes) STATE.societes = [];
   const idx = STATE.societes.findIndex(s => s.id === id);
-  if (idx !== -1) STATE.societes[idx] = data;
-  else STATE.societes.push(data);
+  if (idx !== -1) {
+    const existing = STATE.societes[idx];
+    STATE.societes[idx] = { ...data, is_simulation: existing.is_simulation, simulation_de: existing.simulation_de };
+  } else STATE.societes.push(data);
 
   saveState();
   closeSocieteModal();
@@ -1078,7 +1080,7 @@ function renderSocieteDetail(app, id) {
         ${soc.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue')}
         ${soc.is_simulation ? `<span class="text-xs bg-violet-900/50 text-violet-300 border border-violet-700/50 rounded px-2 py-0.5">Simulation</span>` : ''}
       </div>
-      ${!soc.is_simulation ? `<button onclick="dupliquerEnSimulation('${soc.id}')" class="text-xs bg-violet-900/40 hover:bg-violet-800/50 text-violet-300 border border-violet-700/50 rounded-lg px-3 py-1.5 transition-colors">🔮 Dupliquer en simulation</button>` : ''}
+      <button onclick="dupliquerEnSimulation('${soc.id}')" class="text-xs bg-violet-900/40 hover:bg-violet-800/50 text-violet-300 border border-violet-700/50 rounded-lg px-3 py-1.5 transition-colors">🔮 ${soc.is_simulation ? 'Dupliquer cette simulation' : 'Dupliquer en simulation'}</button>
     </div>
     <div class="flex border-b border-slate-700 mb-6">${tabsHtml}</div>
     <div id="soc-content">${content}</div>
