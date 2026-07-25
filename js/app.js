@@ -587,68 +587,83 @@ function renderDashboard(app) {
       }).join('');
 
   // ── Cartes simulations sociétés ───────────────────────────────────────────
-  const simSocCards = simSocData.length === 0 ? '' : simSocData.map(({ s, caFin, caCour, resultatFin, totDepsHT, fiscEstim, netFinal, missions }) => {
+  const _renderSimDashCard = ({ s, caFin, caCour, resultatFin, totDepsHT, fiscEstim, netFinal }, isFirst, isLast) => {
     const forme   = { ei: 'EI', eurl: 'EURL', sarl: 'SARL', sas: 'SAS', sasu: 'SASU', snc: 'SNC', sci: 'SCI' }[s.forme] || s.forme;
     const reg     = s.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue');
     const pct     = caFin > 0 ? Math.round(caCour / caFin * 100) : 0;
     const barW    = Math.min(100, pct);
     const origine = toutes.find(x => x.id === s.simulation_de);
-
     const fiscLine = fiscEstim !== null ? `
       <div class="flex justify-between items-center text-xs">
         <span class="text-slate-500">Fiscalité estimée (${s.regime_fiscal === 'is' ? 'IS' : 'IR ~9,7% CSG'})</span>
         <span class="text-amber-400 font-medium">− ${fmtE(fiscEstim)}</span>
       </div>` : '';
-
     const netFinalLine = netFinal !== null ? `
       <div class="flex justify-between items-center text-sm border-t border-violet-700/30 pt-2 mt-1">
         <span class="text-slate-300 font-semibold">${s.regime_fiscal === 'is' ? 'Résultat net après IS' : 'Net d\'impôt (scén. 9,7%)'}</span>
         <span class="${netFinal >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold text-base">${fmtE(netFinal)}</span>
       </div>` : '';
-
     return `
-    <a href="#societes/${s.id}" class="block bg-slate-800 rounded-xl border border-violet-700/50 hover:border-violet-500 transition-colors overflow-hidden">
-      <div class="px-4 pt-4 pb-3 flex items-start justify-between">
-        <div>
-          <div class="font-semibold text-violet-200 text-base">${s.nom}</div>
-          <div class="text-slate-500 text-xs mt-0.5">${forme} · ${origine ? `basée sur ${origine.nom}` : 'simulation'}</div>
-        </div>
-        ${reg}
-      </div>
-      <div class="px-4 pb-3">
-        <div class="flex justify-between text-xs mb-1">
-          <span class="text-slate-500">CA encaissé <span class="text-emerald-400 font-medium">${fmtE(caCour)}</span></span>
-          <span class="text-slate-600">/ prév. <span class="text-slate-400">${fmtE(caFin)}</span> · <span class="${pct >= 75 ? 'text-emerald-400' : pct >= 40 ? 'text-amber-400' : 'text-slate-500'}">${pct}%</span></span>
-        </div>
-        <div class="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-          <div class="h-full rounded-full ${pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-violet-500'} transition-all" style="width:${barW}%"></div>
+    <div class="bg-slate-800 rounded-xl border border-violet-700/50 hover:border-violet-500 transition-colors overflow-hidden">
+      <div class="flex items-center justify-between px-3 py-1.5 border-b border-violet-900/40 bg-violet-950/20">
+        <span class="text-violet-600 text-xs select-none">🔮 simulation</span>
+        <div class="flex gap-2">
+          <button onclick="moveSimulation('${s.id}',-1)" ${isFirst ? 'disabled' : ''} class="text-slate-500 hover:text-violet-300 disabled:opacity-20 disabled:cursor-not-allowed transition-colors text-xs px-1.5 py-0.5 rounded hover:bg-violet-900/30" title="Monter">▲</button>
+          <button onclick="moveSimulation('${s.id}',1)"  ${isLast  ? 'disabled' : ''} class="text-slate-500 hover:text-violet-300 disabled:opacity-20 disabled:cursor-not-allowed transition-colors text-xs px-1.5 py-0.5 rounded hover:bg-violet-900/30" title="Descendre">▼</button>
         </div>
       </div>
-      <div class="px-4 pb-4 space-y-1.5 border-t border-violet-700/20 pt-3">
-        <div class="flex justify-between items-center text-xs">
-          <span class="text-slate-500">Résultat avant impôt</span>
-          <span class="${resultatFin > 0 ? 'text-white' : 'text-red-400'} font-semibold">${fmtE(resultatFin)}</span>
+      <a href="#societes/${s.id}" class="block">
+        <div class="px-4 pt-4 pb-3 flex items-start justify-between">
+          <div>
+            <div class="font-semibold text-violet-200 text-base">${s.nom}</div>
+            <div class="text-slate-500 text-xs mt-0.5">${forme} · ${origine ? `basée sur ${origine.nom}` : 'simulation'}</div>
+          </div>
+          ${reg}
         </div>
-        <div class="flex justify-between items-center text-xs">
-          <span class="text-slate-500">Dépenses</span>
-          <span class="text-red-300">${fmtE(totDepsHT)}</span>
+        <div class="px-4 pb-3">
+          <div class="flex justify-between text-xs mb-1">
+            <span class="text-slate-500">CA encaissé <span class="text-emerald-400 font-medium">${fmtE(caCour)}</span></span>
+            <span class="text-slate-600">/ prév. <span class="text-slate-400">${fmtE(caFin)}</span> · <span class="${pct >= 75 ? 'text-emerald-400' : pct >= 40 ? 'text-amber-400' : 'text-slate-500'}">${pct}%</span></span>
+          </div>
+          <div class="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+            <div class="h-full rounded-full ${pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-violet-500'} transition-all" style="width:${barW}%"></div>
+          </div>
         </div>
-        ${fiscLine}
-        ${netFinalLine}
-      </div>
-    </a>`;
-  }).join('');
+        <div class="px-4 pb-4 space-y-1.5 border-t border-violet-700/20 pt-3">
+          <div class="flex justify-between items-center text-xs">
+            <span class="text-slate-500">Résultat avant impôt</span>
+            <span class="${resultatFin > 0 ? 'text-white' : 'text-red-400'} font-semibold">${fmtE(resultatFin)}</span>
+          </div>
+          <div class="flex justify-between items-center text-xs">
+            <span class="text-slate-500">Dépenses</span>
+            <span class="text-red-300">${fmtE(totDepsHT)}</span>
+          </div>
+          ${fiscLine}
+          ${netFinalLine}
+        </div>
+      </a>
+    </div>`;
+  };
 
-  const simSocBlock = simSocData.length === 0 ? '' : `
-  <div class="mb-6">
-    <div class="flex items-center gap-2 mb-3">
-      <h2 class="text-base font-semibold text-violet-300">🔮 Simulations</h2>
-      <span class="text-xs text-violet-600 bg-violet-900/30 border border-violet-800/40 rounded px-2 py-0.5">${simSocData.length} simulation${simSocData.length > 1 ? 's' : ''}</span>
-    </div>
-    <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-      ${simSocCards}
-    </div>
-  </div>`;
+  const simSocBlock = simSocData.length === 0 ? '' : (() => {
+    const groupedHtml = _groupSimulations(simSocData.map(d => d.s)).map(({ groupe, items }) => {
+      const cards = items.map(s => {
+        const gi = simSocData.findIndex(d => d.s.id === s.id);
+        return _renderSimDashCard(simSocData[gi], gi === 0, gi === simSocData.length - 1);
+      }).join('');
+      return `
+        ${groupe ? `<p class="text-xs font-semibold text-violet-400 uppercase tracking-wide mb-3 mt-6">${groupe}</p>` : '<div class="mb-1"></div>'}
+        <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">${cards}</div>`;
+    }).join('');
+    return `
+    <div class="mb-6">
+      <div class="flex items-center gap-2 mb-3">
+        <h2 class="text-base font-semibold text-violet-300">🔮 Simulations</h2>
+        <span class="text-xs text-violet-600 bg-violet-900/30 border border-violet-800/40 rounded px-2 py-0.5">${simSocData.length} simulation${simSocData.length > 1 ? 's' : ''}</span>
+      </div>
+      ${groupedHtml}
+    </div>`;
+  })();
 
   // ── Récap mensuel (revenus mois par mois toutes sociétés) ─────────────────
   const moisLabels = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
@@ -765,9 +780,38 @@ function renderSocietes(app) {
     ? `<div class="text-center py-8 text-slate-500 text-sm">Aucune société. Cliquez sur "+ Ajouter".</div>`
     : `<div class="space-y-3">${societes.map(s => socCard(s, false)).join('')}</div>`;
 
+  const simCard = (s) => {
+    const forme  = { ei: 'EI', eurl: 'EURL', sarl: 'SARL', sas: 'SAS', sasu: 'SASU', snc: 'SNC', sci: 'SCI' }[s.forme] || s.forme;
+    const origine = s.simulation_de ? toutes.find(x => x.id === s.simulation_de) : null;
+    return `
+    <div id="sim-card-${s.id}" data-sim-drop="1"
+      draggable="true"
+      ondragstart="onDragStartSim(event,'${s.id}')"
+      ondragend="onDragEndSim('${s.id}')"
+      ondragover="onDragOverSim(event,'${s.id}')"
+      ondragleave="onDragLeaveSim(event,'${s.id}')"
+      ondrop="onDropSim(event,'${s.id}')"
+      class="bg-slate-800 rounded-xl border border-violet-700/50 p-4 flex items-center justify-between hover:border-violet-500 transition-colors cursor-grab active:cursor-grabbing">
+      <span class="text-slate-600 text-sm select-none shrink-0 mr-3" title="Glisser pour réordonner">⠿</span>
+      <div class="flex-1 min-w-0 cursor-pointer" onclick="navigate('#societes/${s.id}')">
+        <span class="font-semibold text-violet-200">${s.nom}</span>
+        <span class="ml-2 text-slate-500 text-sm">${forme}</span>
+        <span class="ml-2">${s.regime_fiscal === 'ir' ? badge('IR', 'orange') : badge('IS', 'blue')}</span>
+        ${origine ? `<span class="ml-2 text-violet-500 text-xs">basée sur ${origine.nom}</span>` : ''}
+      </div>
+      <div class="flex gap-2 shrink-0" onclick="event.stopPropagation()">
+        <button onclick="openSocieteModal('${s.id}')" class="btn-secondary text-xs">Modifier</button>
+        <button onclick="deleteSociete('${s.id}')" class="btn-danger text-xs">Suppr.</button>
+      </div>
+    </div>`;
+  };
+
   const rowsSim = simulations.length === 0
     ? `<div class="text-slate-600 text-sm italic py-2">Aucune simulation. Dupliquez une société depuis sa fiche.</div>`
-    : `<div class="space-y-3">${simulations.map(s => socCard(s, true)).join('')}</div>`;
+    : _groupSimulations(simulations).map(({ groupe, items }) => `
+        ${groupe ? `<p class="text-xs font-semibold text-violet-400 uppercase tracking-wide mt-4 mb-2 px-1">${groupe}</p>` : ''}
+        <div class="space-y-3">${items.map(s => simCard(s)).join('')}</div>
+      `).join('');
 
   app.innerHTML = `
   ${navBar('societes')}
@@ -830,6 +874,16 @@ function openSocieteModal(id) {
           <label class="label">Note</label>
           <textarea id="sm-note" class="input" rows="2" placeholder="Informations complémentaires…">${v.note || ''}</textarea>
         </div>
+        ${soc?.is_simulation ? (() => {
+          const groupes = [...new Set((STATE.societes || []).filter(s => s.is_simulation && s.simulation_groupe).map(s => s.simulation_groupe))];
+          const datalistId = 'sm-groupe-list';
+          return `<div>
+            <label class="label">Groupe de simulation</label>
+            <input id="sm-groupe" class="input" list="${datalistId}" value="${soc.simulation_groupe || ''}" placeholder="ex: Scénario 2027, Comparatif régimes…" />
+            <datalist id="${datalistId}">${groupes.map(g => `<option value="${g}">`).join('')}</datalist>
+            <p class="text-slate-600 text-xs mt-1">Laisser vide pour ne pas grouper</p>
+          </div>`;
+        })() : ''}
       </div>
       <div class="flex gap-3 mt-5">
         <button class="btn-primary flex-1" onclick="saveSociete('${v.id}')">Enregistrer</button>
@@ -857,7 +911,8 @@ function saveSociete(id) {
   const idx = STATE.societes.findIndex(s => s.id === id);
   if (idx !== -1) {
     const existing = STATE.societes[idx];
-    STATE.societes[idx] = { ...data, is_simulation: existing.is_simulation, simulation_de: existing.simulation_de };
+    const groupe = document.getElementById('sm-groupe')?.value.trim() || null;
+    STATE.societes[idx] = { ...data, is_simulation: existing.is_simulation, simulation_de: existing.simulation_de, simulation_groupe: groupe || undefined };
   } else STATE.societes.push(data);
 
   saveState();
@@ -865,11 +920,82 @@ function saveSociete(id) {
   renderSocietes(document.getElementById('app'));
 }
 
+function _groupSimulations(sims) {
+  // Retourne un tableau [{groupe: string|null, items: [...]}] dans l'ordre d'apparition
+  const groupMap = new Map();
+  sims.forEach(s => {
+    const g = s.simulation_groupe || null;
+    const key = g ?? '__none__';
+    if (!groupMap.has(key)) groupMap.set(key, { groupe: g, items: [] });
+    groupMap.get(key).items.push(s);
+  });
+  return [...groupMap.values()];
+}
+
 function deleteSociete(id) {
   if (!confirm('Supprimer cette société ?')) return;
   STATE.societes = (STATE.societes || []).filter(s => s.id !== id);
   saveState();
   renderSocietes(document.getElementById('app'));
+}
+
+function moveSimulation(id, dir) {
+  const toutes  = STATE.societes || [];
+  const reelles = toutes.filter(s => !s.is_simulation);
+  const sims    = toutes.filter(s => s.is_simulation);
+  const idx     = sims.findIndex(s => s.id === id);
+  if (idx === -1) return;
+  const newIdx  = idx + dir;
+  if (newIdx < 0 || newIdx >= sims.length) return;
+  sims.splice(newIdx, 0, sims.splice(idx, 1)[0]);
+  STATE.societes = [...reelles, ...sims];
+  saveState();
+  render();
+}
+
+let _dragSimId = null;
+
+function onDragStartSim(event, id) {
+  _dragSimId = id;
+  event.dataTransfer.effectAllowed = 'move';
+  setTimeout(() => { const el = document.getElementById('sim-card-' + id); if (el) el.style.opacity = '0.4'; }, 0);
+}
+
+function onDragEndSim(id) {
+  _dragSimId = null;
+  const el = document.getElementById('sim-card-' + id);
+  if (el) { el.style.opacity = ''; el.classList.remove('ring-2', 'ring-violet-400'); }
+  document.querySelectorAll('[data-sim-drop]').forEach(el => el.classList.remove('ring-2', 'ring-violet-400', 'bg-violet-900/20'));
+}
+
+function onDragOverSim(event, id) {
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  if (id === _dragSimId) return;
+  document.querySelectorAll('[data-sim-drop]').forEach(el => el.classList.remove('ring-2', 'ring-violet-400', 'bg-violet-900/20'));
+  const el = document.getElementById('sim-card-' + id);
+  if (el) el.classList.add('ring-2', 'ring-violet-400', 'bg-violet-900/20');
+}
+
+function onDragLeaveSim(event, id) {
+  if (event.relatedTarget && event.currentTarget.contains(event.relatedTarget)) return;
+  const el = document.getElementById('sim-card-' + id);
+  if (el) el.classList.remove('ring-2', 'ring-violet-400', 'bg-violet-900/20');
+}
+
+function onDropSim(event, targetId) {
+  event.preventDefault();
+  if (!_dragSimId || _dragSimId === targetId) return;
+  const toutes  = STATE.societes || [];
+  const reelles = toutes.filter(s => !s.is_simulation);
+  const sims    = toutes.filter(s => s.is_simulation);
+  const fromIdx = sims.findIndex(s => s.id === _dragSimId);
+  const toIdx   = sims.findIndex(s => s.id === targetId);
+  if (fromIdx === -1 || toIdx === -1) return;
+  sims.splice(toIdx, 0, sims.splice(fromIdx, 1)[0]);
+  STATE.societes = [...reelles, ...sims];
+  saveState();
+  render();
 }
 
 function dupliquerEnSimulation(societeId) {
