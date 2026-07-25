@@ -658,7 +658,9 @@ function renderDashboard(app) {
             <button onclick="moveGroup(decodeURIComponent('${encodeURIComponent(groupe)}'),-1)" ${gIdx === 0 ? 'disabled' : ''} class="text-slate-600 hover:text-violet-300 disabled:opacity-20 disabled:cursor-not-allowed transition-colors text-xs px-1 rounded hover:bg-violet-900/30" title="Remonter le groupe">▲</button>
             <button onclick="moveGroup(decodeURIComponent('${encodeURIComponent(groupe)}'),1)" ${gIdx === groups.length - 1 ? 'disabled' : ''} class="text-slate-600 hover:text-violet-300 disabled:opacity-20 disabled:cursor-not-allowed transition-colors text-xs px-1 rounded hover:bg-violet-900/30" title="Descendre le groupe">▼</button>
           </div>`
-        : '<div class="mb-1"></div>';
+        : `<div class="flex items-center gap-2 mb-3 mt-6">
+            <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Sans groupe</p>
+          </div>`;
       return `${groupHeader}<div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">${cards}</div>`;
     }).join('');
     return `
@@ -927,7 +929,7 @@ function saveSociete(id) {
 }
 
 function _groupSimulations(sims) {
-  // Retourne un tableau [{groupe: string|null, items: [...]}] dans l'ordre d'apparition
+  // Retourne [{groupe: string|null, items: [...]}] — groupes nommés d'abord, sans-groupe en dernier
   const groupMap = new Map();
   sims.forEach(s => {
     const g = s.simulation_groupe || null;
@@ -935,7 +937,8 @@ function _groupSimulations(sims) {
     if (!groupMap.has(key)) groupMap.set(key, { groupe: g, items: [] });
     groupMap.get(key).items.push(s);
   });
-  return [...groupMap.values()];
+  const all = [...groupMap.values()];
+  return [...all.filter(g => g.groupe !== null), ...all.filter(g => g.groupe === null)];
 }
 
 function deleteSociete(id) {
