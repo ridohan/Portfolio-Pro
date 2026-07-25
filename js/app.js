@@ -3667,6 +3667,8 @@ function calcIR(params) {
     bic_bnc           = 0,
     foncier           = 0,
     micro_foncier     = 0,
+    micro_ca          = 0,
+    micro_type        = 'vente',
     dividendes_bareme = 0,
     dividendes_pfu    = 0,
     pv_bareme         = 0,
@@ -3710,8 +3712,19 @@ function calcIR(params) {
   const abattMicroFoncier = Math.round(micro_foncier * 0.30);
   const microFoncierNet   = micro_foncier - abattMicroFoncier;
 
+  // 2c. Micro-entreprise : abattement forfaitaire sur CA encaissé, taux selon l'activité
+  //   Vente/hébergement (BIC) : 71% — Prestations de services (BIC) : 50% — Libéral (BNC) : 34%
+  //   L'abattement ne peut pas être inférieur à 305€ (plancher légal), ni excéder le CA
+  const TAUX_ABATT_MICRO = { vente: 0.71, bic_service: 0.50, bnc: 0.34 };
+  const ABATT_MICRO_MIN  = 305;
+  const tauxMicro   = TAUX_ABATT_MICRO[micro_type] ?? TAUX_ABATT_MICRO.bnc;
+  const abattMicro  = micro_ca > 0
+    ? Math.round(Math.max(micro_ca * tauxMicro, Math.min(ABATT_MICRO_MIN, micro_ca)))
+    : 0;
+  const microNet    = Math.max(0, micro_ca - abattMicro);
+
   // 3. Revenu net global (avant déductions spécifiques)
-  const revenuNetGlobal = salairesNet + bic_bnc + foncier + microFoncierNet + dividendesBaremeNet + pv_bareme + autres;
+  const revenuNetGlobal = salairesNet + bic_bnc + foncier + microFoncierNet + microNet + dividendesBaremeNet + pv_bareme + autres;
 
   // 3b. Déduction PER (réduit le revenu imposable, dans la limite du revenu global)
   const deductionPER   = Math.min(Math.max(0, per), revenuNetGlobal);
@@ -3850,13 +3863,14 @@ function calcIR(params) {
   const resteAPayer = impotFinal - pas_preleve;
   const remboursementPAS = resteAPayer < 0 ? Math.abs(resteAPayer) : 0;
 
-  const revenuTotal = salaires + bic_bnc + foncier + micro_foncier + dividendes_bareme + dividendes_pfu + pv_bareme + pv_pfu + autres;
+  const revenuTotal = salaires + bic_bnc + foncier + micro_foncier + micro_ca + dividendes_bareme + dividendes_pfu + pv_bareme + pv_pfu + autres;
   const txMoyen     = revenuTotal > 0 ? (impotFinal / revenuTotal) * 100 : 0;
 
   return {
     // Inputs recap
     salaires, salairesNet, abatt10, abatt10_vous, abatt10_conjoint, abatt40, dividendesBaremeNet,
     abattMicroFoncier, microFoncierNet,
+    abattMicro, microNet, tauxMicro,
     revenuNetGlobal, revenuImposable, deductionPER, rfr, nbParts, baseParts,
     // Barème
     detailTranches, impotBase, impotQFBrut, correctionPlafond,
@@ -3896,6 +3910,8 @@ let _irState = {
   bic_bnc:            0,
   foncier:            0,
   micro_foncier:      0,
+  micro_ca:           0,   // micro-entreprise : CA encaissé (abattement forfaitaire selon micro_type)
+  micro_type:         'vente',   // 'vente' (71%) | 'bic_service' (50%) | 'bnc' (34%)
   dividendes_bareme:  0,
   dividendes_pfu:     0,
   pv_bareme:          0,
@@ -4049,6 +4065,18 @@ function renderIRForm() {
         placeholder="0" onchange="updateIR('micro_foncier', parseFloat(this.value)||0)" />
     </div>
 
+    <div class="space-y-1">
+      <label class="label">Micro-entreprise — CA encaissé (€)</label>
+      <select class="input mb-1" onchange="updateIR('micro_type', this.value)">
+        <option value="vente"       ${s.micro_type==='vente'?'selected':''}>Vente de marchandises / hébergement (abatt. 71%)</option>
+        <option value="bic_service" ${s.micro_type==='bic_service'?'selected':''}>Prestations de services BIC / artisan (abatt. 50%)</option>
+        <option value="bnc"         ${s.micro_type==='bnc'?'selected':''}>Prestations de services BNC / libéral (abatt. 34%)</option>
+      </select>
+      <p class="text-slate-500 text-xs -mt-1">Abattement forfaitaire auto (plancher 305€), régime si CA ≤ seuils micro-BIC/BNC</p>
+      <input class="input" type="number" min="0" value="${s.micro_ca||''}"
+        placeholder="0" onchange="updateIR('micro_ca', parseFloat(this.value)||0)" />
+    </div>
+
     `;
 
   const divPvContent = `
@@ -4179,7 +4207,7 @@ function renderIRResults() {
   const r = calcIR(p);
 
   const totalRevenu = (_irState.salaires_vous||0) + (_irState.salaires_conjoint||0) + (_irState.bic_bnc||0) + (_irState.foncier||0)
-    + (_irState.micro_foncier||0) + (_irState.dividendes_bareme||0) + (_irState.dividendes_pfu||0)
+    + (_irState.micro_foncier||0) + (_irState.micro_ca||0) + (_irState.dividendes_bareme||0) + (_irState.dividendes_pfu||0)
     + (_irState.pv_bareme||0) + (_irState.pv_pfu||0) + (_irState.autres||0);
 
   if (totalRevenu === 0) {
@@ -4283,6 +4311,10 @@ function renderIRResults() {
       ${r.abattMicroFoncier > 0 ? `<div class="flex justify-between text-xs">
         <span class="text-slate-500">dont abattement 30% micro-foncier</span>
         <span class="text-slate-400">−${fmtE(r.abattMicroFoncier)}</span>
+      </div>` : ''}
+      ${r.abattMicro > 0 ? `<div class="flex justify-between text-xs">
+        <span class="text-slate-500">dont abattement ${Math.round(r.tauxMicro*100)}% micro-entreprise</span>
+        <span class="text-slate-400">−${fmtE(r.abattMicro)}</span>
       </div>` : ''}
       ${r.deductionPER > 0 ? `<div class="flex justify-between text-xs">
         <span class="text-slate-500">Déduction PER</span>

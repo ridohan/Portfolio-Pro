@@ -38,6 +38,7 @@ Chaque objet `BAREMES[annee]` contient également : `plafond_demi_part`, les bor
 | BIC / BNC | Résultat net professionnel |
 | Revenus fonciers — régime réel | Revenus nets après charges |
 | Micro-foncier — recettes brutes | Abattement 30% appliqué automatiquement |
+| Micro-entreprise — CA encaissé | Abattement forfaitaire selon l'activité (71% vente, 50% BIC services, 34% BNC) |
 | Dividendes — option barème | Abattement 40% + intégration au barème IR |
 | Dividendes — PFU | Flat tax 30% (12,8 % IR + 17,2 % PS) |
 | Plus-values mobilières — barème | Intégration au barème IR |
@@ -56,6 +57,25 @@ abattement_total = abattement_vous + abattement_conjoint
 ```
 
 Le minimum de 504 € s'applique individuellement — ce qui est crucial pour les petits salaires (ex. 1 500 € brut → abattement 504 € et non 150 €).
+
+---
+
+### 3b. Abattement forfaitaire micro-entreprise
+
+Le CA encaissé (`micro_ca`) est saisi brut ; l'abattement forfaitaire dépend de la nature de l'activité (`micro_type`) :
+
+| Activité | Taux abattement |
+|---|---|
+| Vente de marchandises / fourniture de logement (BIC) | 71 % |
+| Prestations de services BIC (artisan, commerçant) | 50 % |
+| Prestations de services BNC (professions libérales) | 34 % |
+
+```
+abattement = max(CA × taux, min(305€, CA))
+net_imposable = CA − abattement
+```
+
+Le plancher légal de 305 € s'applique quel que soit le taux (sans jamais dépasser le CA saisi). Le revenu net obtenu est intégré au revenu net global comme un revenu professionnel classique. Les cotisations sociales du régime micro-social (payées à l'URSSAF) ne sont pas modélisées ici — seul l'IR est calculé.
 
 ---
 
@@ -185,7 +205,7 @@ Organisé en **blocs collapsibles** (`<details>/<summary>`) :
 | Bloc | Ouvert par défaut |
 |---|---|
 | Situation fiscale | ✅ |
-| Revenus (salaires, BIC, foncier, micro-foncier) | ✅ |
+| Revenus (salaires, BIC, foncier, micro-foncier, micro-entreprise) | ✅ |
 | Dividendes, plus-values & autres | ❌ |
 | Déductions du revenu (PER) | ❌ |
 | Réductions d'impôt | ❌ |
