@@ -646,14 +646,20 @@ function renderDashboard(app) {
   };
 
   const simSocBlock = simSocData.length === 0 ? '' : (() => {
-    const groupedHtml = _groupSimulations(simSocData.map(d => d.s)).map(({ groupe, items }) => {
-      const cards = items.map(s => {
-        const gi = simSocData.findIndex(d => d.s.id === s.id);
-        return _renderSimDashCard(simSocData[gi], gi === 0, gi === simSocData.length - 1);
+    const groups = _groupSimulations(simSocData.map(d => d.s));
+    const groupedHtml = groups.map(({ groupe, items }, gIdx) => {
+      const cards = items.map((s, i) => {
+        const d = simSocData.find(dd => dd.s.id === s.id);
+        return _renderSimDashCard(d, i === 0, i === items.length - 1);
       }).join('');
-      return `
-        ${groupe ? `<p class="text-xs font-semibold text-violet-400 uppercase tracking-wide mb-3 mt-6">${groupe}</p>` : '<div class="mb-1"></div>'}
-        <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">${cards}</div>`;
+      const groupHeader = groupe
+        ? `<div class="flex items-center gap-2 mb-3 mt-6">
+            <p class="text-xs font-semibold text-violet-400 uppercase tracking-wide">${groupe}</p>
+            <button onclick="moveGroup(decodeURIComponent('${encodeURIComponent(groupe)}'),-1)" ${gIdx === 0 ? 'disabled' : ''} class="text-slate-600 hover:text-violet-300 disabled:opacity-20 disabled:cursor-not-allowed transition-colors text-xs px-1 rounded hover:bg-violet-900/30" title="Remonter le groupe">▲</button>
+            <button onclick="moveGroup(decodeURIComponent('${encodeURIComponent(groupe)}'),1)" ${gIdx === groups.length - 1 ? 'disabled' : ''} class="text-slate-600 hover:text-violet-300 disabled:opacity-20 disabled:cursor-not-allowed transition-colors text-xs px-1 rounded hover:bg-violet-900/30" title="Descendre le groupe">▼</button>
+          </div>`
+        : '<div class="mb-1"></div>';
+      return `${groupHeader}<div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">${cards}</div>`;
     }).join('');
     return `
     <div class="mb-6">
@@ -940,15 +946,37 @@ function deleteSociete(id) {
 }
 
 function moveSimulation(id, dir) {
+  const toutes   = STATE.societes || [];
+  const reelles  = toutes.filter(s => !s.is_simulation);
+  const sims     = toutes.filter(s => s.is_simulation);
+  const sim      = sims.find(s => s.id === id);
+  if (!sim) return;
+  const groupe   = sim.simulation_groupe || null;
+  // Voisins dans le même groupe, dans leur ordre actuel
+  const siblings = sims.filter(s => (s.simulation_groupe || null) === groupe);
+  const posInGrp = siblings.findIndex(s => s.id === id);
+  const newPos   = posInGrp + dir;
+  if (newPos < 0 || newPos >= siblings.length) return;
+  // Échanger les positions dans le tableau plat
+  const idxA = sims.findIndex(s => s.id === id);
+  const idxB = sims.findIndex(s => s.id === siblings[newPos].id);
+  [sims[idxA], sims[idxB]] = [sims[idxB], sims[idxA]];
+  STATE.societes = [...reelles, ...sims];
+  saveState();
+  render();
+}
+
+function moveGroup(groupName, dir) {
   const toutes  = STATE.societes || [];
   const reelles = toutes.filter(s => !s.is_simulation);
   const sims    = toutes.filter(s => s.is_simulation);
-  const idx     = sims.findIndex(s => s.id === id);
-  if (idx === -1) return;
-  const newIdx  = idx + dir;
-  if (newIdx < 0 || newIdx >= sims.length) return;
-  sims.splice(newIdx, 0, sims.splice(idx, 1)[0]);
-  STATE.societes = [...reelles, ...sims];
+  const groups  = _groupSimulations(sims);
+  const gIdx    = groups.findIndex(g => g.groupe === groupName);
+  if (gIdx === -1) return;
+  const newGIdx = gIdx + dir;
+  if (newGIdx < 0 || newGIdx >= groups.length) return;
+  [groups[gIdx], groups[newGIdx]] = [groups[newGIdx], groups[gIdx]];
+  STATE.societes = [...reelles, ...groups.flatMap(g => g.items)];
   saveState();
   render();
 }
