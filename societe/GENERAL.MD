@@ -126,6 +126,7 @@ ca_ttc   = tva ? ca_ht × 1.20 : ca_ht       (si pas de TVA : TTC = HT)
 tva_due  = ca_ttc - ca_ht
 ```
 
+
 ---
 
 ## Interface — Vue détail société
